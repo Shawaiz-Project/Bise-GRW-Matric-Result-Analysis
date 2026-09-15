@@ -1,2 +1,4 @@
-# No Python package is required when deployed with a PythonAnywhere Static Files mapping.
-# Flask is optional only if you choose to serve this dashboard through a Flask route.
+Flask>=3.0.0
+flask-cors>=4.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0

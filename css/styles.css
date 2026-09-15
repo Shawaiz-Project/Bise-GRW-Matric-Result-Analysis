@@ -357,3 +357,138 @@ code {
   .upload-card { padding: 22px; }
   .chart-wrap, .chart-wrap.tall { min-height: 300px; }
 }
+
+/* ═══ SKELETON LOADERS & MICRO-ANIMATIONS ═════════════════════════════ */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.kpi-card.skeleton-card strong,
+.kpi-card.skeleton-card small {
+  display: inline-block;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-soft) 25%, var(--surface-strong) 50%, var(--surface-soft) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite;
+  color: transparent !important;
+}
+.kpi-card.skeleton-card strong { width: 60%; height: 28px; margin: 8px 0; }
+.kpi-card.skeleton-card small { width: 85%; height: 14px; }
+
+/* ═══ TOPBAR DATASET SELECTOR ═════════════════════════════════════════ */
+.dataset-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topbar-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dataset-select {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.dataset-select:focus {
+  border-color: var(--primary);
+}
+
+/* ═══ RANKING STYLES ══════════════════════════════════════════════════ */
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-weight: 800;
+  font-size: 0.82rem;
+}
+.rank-gold {
+  background: linear-gradient(135deg, #ffd700, #ffae00);
+  color: #5c3b00;
+  box-shadow: 0 2px 10px rgba(255, 174, 0, 0.35);
+}
+.rank-silver {
+  background: linear-gradient(135deg, #e0e0e0, #b0bec5);
+  color: #37474f;
+  box-shadow: 0 2px 8px rgba(176, 190, 197, 0.35);
+}
+.rank-bronze {
+  background: linear-gradient(135deg, #cd7f32, #b87333);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(184, 115, 51, 0.35);
+}
+.rank-default {
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+.score-pill {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+
+/* ═══ STUDENT MODAL ENHANCEMENTS ═══════════════════════════════════════ */
+.student-rank-banner {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.rank-box {
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
+  text-align: center;
+}
+.rank-box span {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.rank-box strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 1.35rem;
+  color: var(--primary);
+  font-weight: 900;
+}
+.subject-chip {
+  display: inline-block;
+  margin: 3px 4px 3px 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+

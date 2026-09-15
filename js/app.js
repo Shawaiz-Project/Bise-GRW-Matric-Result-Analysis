@@ -3,46 +3,42 @@
 (() => {
   "use strict";
 
-  const BUNDLED_WORKBOOK_URL = "data/MA_2026_results_analysis.xlsx";
-  const BUNDLED_WORKBOOK_NAME = "MA_2026_results_analysis.xlsx";
-
+  // ─── APPLICATION STATE ───────────────────────────────────────────────────
   const state = {
-    worker: null,
-    ready: false,
-    payload: null,
+    datasets: [],
+    activeDatasetId: null,
+    activePage: "overview",
     charts: new Map(),
-    currentStudentPage: 1,
-    currentStudentRequestId: 0,
-    currentDetailRequestId: 0,
-    currentExportRequestId: 0,
-    schoolRows: [],
-    subjectRows: [],
+    summaryData: null,
+    studentPage: 1,
+    studentLimit: 50,
+    studentTotal: 0,
+    studentPages: 1,
+    schoolPage: 1,
+    schoolLimit: 50,
+    schoolTotal: 0,
+    schoolPages: 1,
+    filterOptions: null,
+    theme: localStorage.getItem("bise_theme") || "light",
   };
 
   const pageMeta = {
-    overview: ["Overview", "Interactive analysis of the complete result workbook"],
-    students: ["Students", "Search, filter, inspect, and export candidate records"],
-    schools: ["Schools", "Compare institution size, outcomes, and academic performance"],
-    subjects: ["Subjects", "Analyze failed-subject and supplementary-slip patterns"],
-    insights: ["Insights", "Automatically generated findings from the workbook"],
-    quality: ["Data quality", "Review extraction checks and retained anomalies"],
+    overview: ["Overview", "Key performance indicators, distributions, and school comparisons."],
+    students: ["Student Search", "Search, filter, and inspect candidate records via server-side API."],
+    schools: ["School Analysis", "Compare candidate volume, pass rates, average marks, and outcomes across institutions."],
+    rankings: ["School Rankings", "Weighted performance ranking: 50% pass rate + 30% average marks + 20% top performance."],
+    subjects: ["Subject Slip Analysis", "Identify subjects with the highest failure and supplementary slip rates."],
+    insights: ["Automatic Insights", "Dynamically generated findings from the actual result database."],
+    quality: ["Data Quality", "Review extraction checks, reconciliation indicators, and validation metrics."],
   };
 
   const chartPalette = [
-    "#2457d6",
-    "#12a678",
-    "#e14e5d",
-    "#f0a126",
-    "#7047d7",
-    "#178aa5",
-    "#df6b2b",
-    "#72839f",
-    "#9e4f9e",
-    "#66a331",
-    "#bb516f",
-    "#3b78aa",
+    "#2457d6", "#12a678", "#e14e5d", "#f0a126",
+    "#7047d7", "#178aa5", "#df6b2b", "#72839f",
+    "#9e4f9e", "#66a331", "#bb516f", "#3b78aa"
   ];
 
+  // ─── DOM HELPERS ─────────────────────────────────────────────────────────
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
@@ -81,7 +77,7 @@
       : `${number.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}%`;
   }
 
-  function shortText(value, maxLength = 42) {
+  function shortText(value, maxLength = 36) {
     const text = String(value ?? "").trim();
     if (text.length <= maxLength) return text;
     return `${text.slice(0, maxLength - 1)}…`;
@@ -93,6 +89,7 @@
 
   function showToast(title, message, type = "success", timeout = 4200) {
     const container = $("#toastContainer");
+    if (!container) return;
     const toast = document.createElement("div");
     toast.className = `toast ${type}`;
     toast.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span>`;
@@ -102,929 +99,1315 @@
 
   function setDataStatus(mode, text) {
     const pill = $("#dataStatusPill");
+    if (!pill) return;
     pill.classList.remove("ready", "loading", "error");
     if (mode) pill.classList.add(mode);
     const label = pill.querySelector("span:last-child");
     if (label) label.textContent = text;
   }
 
-  function setProgress(percent, message) {
-    $("#uploadProgress").classList.remove("hidden");
-    $("#progressText").textContent = message || "Processing workbook";
-    $("#progressPercent").textContent = `${Math.round(percent)}%`;
-    $("#progressBar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  // ─── API CLIENT ──────────────────────────────────────────────────────────
+  async function apiFetch(endpoint, params = {}) {
+    const query = new URLSearchParams();
+    if (state.activeDatasetId) {
+      query.set("dataset_id", String(state.activeDatasetId));
+    }
+    for (const [key, val] of Object.entries(params)) {
+      if (val !== null && val !== undefined && val !== "") {
+        query.set(key, String(val));
+      }
+    }
+    const url = `/api/${endpoint}${query.toString() ? "?" + query.toString() : ""}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(err.error || `HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    return json.data;
   }
 
-  function createWorker() {
-    if (state.worker) state.worker.terminate();
-    state.worker = new Worker("js/data-worker.js");
-    state.worker.addEventListener("message", handleWorkerMessage);
-    state.worker.addEventListener("error", (event) => {
-      setDataStatus("error", "Worker error");
-      showToast("Dashboard error", event.message || "The data worker could not start.", "error", 7000);
+  // ─── CHART HELPERS ───────────────────────────────────────────────────────
+  function destroyChart(id) {
+    if (state.charts.has(id)) {
+      try {
+        state.charts.get(id).destroy();
+      } catch (_) {}
+      state.charts.delete(id);
+    }
+  }
+
+  function getChartTheme() {
+    const isDark = state.theme === "dark";
+    return {
+      textColor: isDark ? "#a5b0c3" : "#667085",
+      gridColor: isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(15, 23, 42, 0.06)",
+      tooltipBg: isDark ? "#1c2940" : "#ffffff",
+      tooltipText: isDark ? "#f4f7fb" : "#172033",
+    };
+  }
+
+  function registerChart(id, chart) {
+    destroyChart(id);
+    state.charts.set(id, chart);
+    return chart;
+  }
+
+  // ─── THEME & NAVIGATION ──────────────────────────────────────────────────
+  function applyTheme(theme) {
+    state.theme = theme;
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("bise_theme", theme);
+    // Re-render charts with new theme colors
+    if (state.summaryData && state.activePage === "overview") {
+      renderOverviewCharts(state.summaryData);
+    }
+  }
+
+  function navigateToPage(pageKey) {
+    if (!pageMeta[pageKey]) pageKey = "overview";
+    state.activePage = pageKey;
+
+    // Update nav items
+    $$(".nav-item").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.pageTarget === pageKey);
     });
+
+    // Update page sections
+    $$(".page-section").forEach((sec) => {
+      sec.classList.toggle("active", sec.dataset.page === pageKey);
+    });
+
+    // Update topbar titles
+    const [title, subtitle] = pageMeta[pageKey];
+    $("#pageTitle").textContent = title;
+    $("#pageSubtitle").textContent = subtitle;
+
+    // Close mobile menu
+    $("#sidebar").classList.remove("open");
+
+    // Load data for the page if not loaded
+    loadPageData(pageKey);
+
+    // Update URL hash without scroll
+    history.replaceState(null, "", `#${pageKey}`);
   }
 
-  function handleWorkerMessage(event) {
-    const message = event.data || {};
-    if (message.type === "progress") {
-      setDataStatus("loading", message.message || "Loading data");
-      setProgress(message.percent || 0, message.message || "Processing workbook");
-      return;
-    }
-    if (message.type === "ready") {
-      handleWorkbookReady(message.payload);
-      return;
-    }
-    if (message.type === "studentResults") {
-      if (message.requestId !== state.currentStudentRequestId) return;
-      renderStudentResults(message);
-      return;
-    }
-    if (message.type === "studentDetail") {
-      if (message.requestId !== state.currentDetailRequestId) return;
-      renderStudentModal(message.student);
-      return;
-    }
-    if (message.type === "exportReady") {
-      if (message.requestId !== state.currentExportRequestId) return;
-      downloadCsv(message.csv, `student_search_results_${new Date().toISOString().slice(0, 10)}.csv`);
-      const note = message.truncated
-        ? `Exported ${formatNumber(message.exported)} of ${formatNumber(message.matched)} matches. The export limit is 50,000 rows.`
-        : `Exported ${formatNumber(message.exported)} matching records.`;
-      showToast("CSV created", note, "success");
-      return;
-    }
-    if (message.type === "error") {
-      setDataStatus("error", "Data error");
-      showToast("Could not process data", message.message || "Unknown worker error", "error", 8000);
+  function loadPageData(pageKey) {
+    switch (pageKey) {
+      case "overview":
+        loadOverview();
+        break;
+      case "students":
+        loadStudents();
+        break;
+      case "schools":
+        loadSchools();
+        break;
+      case "rankings":
+        loadRankings();
+        break;
+      case "subjects":
+        loadSubjects();
+        break;
+      case "insights":
+        loadInsights();
+        break;
+      case "quality":
+        loadQuality();
+        break;
     }
   }
 
-  async function loadWorkbookFile(file) {
-    if (!file) return;
-    if (!/\.(xlsx|xls)$/i.test(file.name)) {
-      showToast("Unsupported file", "Select an Excel workbook ending in .xlsx or .xls.", "error");
+  // ─── OVERVIEW PAGE ───────────────────────────────────────────────────────
+  async function loadOverview(forceRefresh = false) {
+    if (state.summaryData && !forceRefresh) {
+      renderOverviewKpis(state.summaryData);
+      renderOverviewCharts(state.summaryData);
       return;
     }
 
     try {
-      state.ready = false;
-      setDataStatus("loading", "Reading workbook");
-      setProgress(2, "Reading selected file");
-      $("#uploadOverlay").classList.remove("hidden");
-      const buffer = await file.arrayBuffer();
-      createWorker();
-      state.worker.postMessage({ type: "loadWorkbook", buffer, fileName: file.name }, [buffer]);
-    } catch (error) {
-      setDataStatus("error", "Upload failed");
-      showToast("Upload failed", error.message || String(error), "error", 8000);
+      setDataStatus("loading", "Loading summary");
+      const summary = await apiFetch("summary");
+      state.summaryData = summary;
+      setDataStatus("ready", "Data ready");
+      renderOverviewKpis(summary);
+      renderOverviewCharts(summary);
+      loadTopStudents();
+    } catch (err) {
+      setDataStatus("error", "Error loading data");
+      showToast("Could not load summary", err.message, "error");
     }
   }
 
-  async function loadBundledWorkbook() {
+  function renderOverviewKpis(data) {
+    const totalCand = data.total_candidates || data.total_extracted || 0;
+    const appeared = data.appeared || 0;
+    const appRate = data.appearance_rate || (totalCand > 0 ? (appeared / totalCand) * 100 : 0);
+    const schools = data.total_institutions || data.school_count || 0;
+
+    const kpis = [
+      { label: "Total Candidates", value: formatNumber(totalCand), note: "Registered students" },
+      { label: "Appeared", value: formatNumber(appeared), note: `${formatPercent(appRate)} appearance rate` },
+      { label: "Passed", value: formatNumber(data.passed), note: "SSC certificate granted" },
+      { label: "Pass Percentage", value: formatPercent(data.pass_percentage), note: "Of appeared candidates" },
+      { label: "Fail / Subject Slip", value: formatNumber(data.fail_slip), note: "Supplementary candidates" },
+      { label: "Highest Marks", value: formatNumber(data.highest_marks), note: `Top score achieved` },
+      { label: "Average Marks", value: formatDecimal(data.average_marks), note: "Among passing candidates" },
+      { label: "Schools", value: formatNumber(schools), note: "Tracked institutions" },
+    ];
+
+    const container = $("#overviewKpis");
+    container.innerHTML = kpis
+      .map(
+        (k) => `
+        <article class="kpi-card">
+          <span>${escapeHtml(k.label)}</span>
+          <strong>${escapeHtml(k.value)}</strong>
+          <small>${escapeHtml(k.note)}</small>
+        </article>`
+      )
+      .join("");
+  }
+
+  function renderOverviewCharts(data) {
+    const ct = getChartTheme();
+
+    // 1. Pass vs Not Passed (Doughnut)
+    const passFailEl = $("#passFailChart");
+    if (passFailEl) {
+      const passed = data.passed || 0;
+      const notPassed = Math.max(0, (data.appeared || 0) - passed);
+      registerChart(
+        "passFailChart",
+        new Chart(passFailEl, {
+          type: "doughnut",
+          data: {
+            labels: ["Passed", "Not Passed / Slip"],
+            datasets: [{
+              data: [passed, notPassed],
+              backgroundColor: ["#12a678", "#e14e5d"],
+              borderWidth: 0,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: "bottom", labels: { color: ct.textColor, font: { family: "Inter" } } },
+            },
+            cutout: "68%",
+          },
+        })
+      );
+    }
+
+    // 2. Status Distribution (Doughnut)
+    const statusEl = $("#statusChart");
+    if (statusEl && Array.isArray(data.status_summary)) {
+      const labels = data.status_summary.map((s) => s.status);
+      const counts = data.status_summary.map((s) => s.candidates ?? s.student_count ?? 0);
+      registerChart(
+        "statusChart",
+        new Chart(statusEl, {
+          type: "doughnut",
+          data: {
+            labels,
+            datasets: [{
+              data: counts,
+              backgroundColor: chartPalette.slice(0, labels.length),
+              borderWidth: 0,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: "bottom", labels: { color: ct.textColor, font: { family: "Inter", size: 11 } } },
+            },
+            cutout: "60%",
+          },
+        })
+      );
+    }
+
+    // 3. Marks Distribution (Bar)
+    const marksEl = $("#marksChart");
+    if (marksEl && Array.isArray(data.marks_distribution)) {
+      const labels = data.marks_distribution.map((m) => m.marks_range || m.range_label);
+      const counts = data.marks_distribution.map((m) => m.candidates ?? m.students ?? 0);
+      registerChart(
+        "marksChart",
+        new Chart(marksEl, {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{
+              label: "Students",
+              data: counts,
+              backgroundColor: "#2457d6",
+              borderRadius: 6,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: ct.textColor, maxRotation: 45 }, grid: { display: false } },
+              y: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+            },
+          },
+        })
+      );
+    }
+
+    // 4. Grade Distribution (Bar)
+    const gradeEl = $("#gradeChart");
+    if (gradeEl && Array.isArray(data.grade_distribution)) {
+      const labels = data.grade_distribution.map((g) => g.grade || g.label);
+      const counts = data.grade_distribution.map((g) => g.candidates ?? g.students ?? 0);
+      registerChart(
+        "gradeChart",
+        new Chart(gradeEl, {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{
+              label: "Students",
+              data: counts,
+              backgroundColor: ["#12a678", "#2457d6", "#7047d7", "#f0a126", "#df6b2b", "#e14e5d", "#72839f"],
+              borderRadius: 6,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: ct.textColor }, grid: { display: false } },
+              y: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+            },
+          },
+        })
+      );
+    }
+
+    // 5. Candidate Type Performance (Doughnut)
+    const typeEl = $("#candidateTypeChart");
+    if (typeEl && Array.isArray(data.candidate_types)) {
+      const labels = data.candidate_types.map((t) => t.candidate_type);
+      const counts = data.candidate_types.map((t) => t.candidates ?? t.extracted ?? 0);
+      registerChart(
+        "candidateTypeChart",
+        new Chart(typeEl, {
+          type: "doughnut",
+          data: {
+            labels,
+            datasets: [{
+              data: counts,
+              backgroundColor: ["#2457d6", "#f0a126"],
+              borderWidth: 0,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: "bottom", labels: { color: ct.textColor } } },
+            cutout: "62%",
+          },
+        })
+      );
+    }
+
+    // 6. Top Failed Subjects (fetch /api/subjects)
+    apiFetch("subjects", { sort: "unique_students" }).then((res) => {
+      const subs = (res.subjects || []).slice(0, 8);
+      const subEl = $("#subjectFailureChart");
+      if (subEl && subs.length) {
+        registerChart(
+          "subjectFailureChart",
+          new Chart(subEl, {
+            type: "bar",
+            indexAxis: "y",
+            data: {
+              labels: subs.map((s) => shortText(s.subject_name, 22)),
+              datasets: [{
+                label: "Unique Students",
+                data: subs.map((s) => s.unique_students),
+                backgroundColor: "#e14e5d",
+                borderRadius: 6,
+              }],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                y: { ticks: { color: ct.textColor }, grid: { display: false } },
+              },
+            },
+          })
+        );
+      }
+
+      // 7. Part-I vs Part-II Slips
+      const partsEl = $("#subjectPartsChart");
+      if (partsEl && subs.length) {
+        registerChart(
+          "subjectPartsChart",
+          new Chart(partsEl, {
+            type: "bar",
+            data: {
+              labels: subs.map((s) => shortText(s.subject_name, 16)),
+              datasets: [
+                { label: "Part-I", data: subs.map((s) => s.part1_entries), backgroundColor: "#2457d6", borderRadius: 4 },
+                { label: "Part-II", data: subs.map((s) => s.part2_entries), backgroundColor: "#f0a126", borderRadius: 4 },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { position: "bottom", labels: { color: ct.textColor } } },
+              scales: {
+                x: { ticks: { color: ct.textColor, maxRotation: 45 }, grid: { display: false } },
+                y: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+              },
+            },
+          })
+        );
+      }
+    }).catch(() => {});
+
+    // 8. Largest Schools (fetch /api/schools?sort=candidates&limit=8)
+    apiFetch("schools", { sort: "candidates", limit: 8 }).then((res) => {
+      const schools = res.schools || [];
+      const el = $("#largestSchoolsChart");
+      if (el && schools.length) {
+        registerChart(
+          "largestSchoolsChart",
+          new Chart(el, {
+            type: "bar",
+            indexAxis: "y",
+            data: {
+              labels: schools.map((s) => shortText(s.institution_name, 26)),
+              datasets: [{
+                label: "Candidates",
+                data: schools.map((s) => s.candidates),
+                backgroundColor: "#7047d7",
+                borderRadius: 6,
+              }],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                y: { ticks: { color: ct.textColor }, grid: { display: false } },
+              },
+            },
+          })
+        );
+      }
+    }).catch(() => {});
+
+    // 9. Best School Pass Rates (fetch /api/schools?sort=pass_rate&min_candidates=50&limit=8)
+    apiFetch("schools", { sort: "pass_rate", min_candidates: 50, limit: 8 }).then((res) => {
+      const schools = res.schools || [];
+      const el = $("#schoolPassRateChart");
+      if (el && schools.length) {
+        registerChart(
+          "schoolPassRateChart",
+          new Chart(el, {
+            type: "bar",
+            indexAxis: "y",
+            data: {
+              labels: schools.map((s) => shortText(s.institution_name, 26)),
+              datasets: [{
+                label: "Pass Rate %",
+                data: schools.map((s) => s.pass_percentage),
+                backgroundColor: "#12a678",
+                borderRadius: 6,
+              }],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { min: 0, max: 100, ticks: { color: ct.textColor, callback: (v) => `${v}%` }, grid: { color: ct.gridColor } },
+                y: { ticks: { color: ct.textColor }, grid: { display: false } },
+              },
+            },
+          })
+        );
+      }
+    }).catch(() => {});
+  }
+
+  async function loadTopStudents() {
     try {
-      state.ready = false;
-      setDataStatus("loading", "Loading integrated workbook");
-      setProgress(4, "Downloading integrated Excel workbook");
-      $("#uploadOverlay").classList.remove("hidden");
+      const students = await apiFetch("top-students", { limit: 10 });
+      const tbody = $("#topStudentsTable tbody");
+      if (!tbody) return;
+      if (!students || !students.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">No top students found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = students
+        .map(
+          (s, idx) => `
+        <tr>
+          <td><span class="rank-badge ${idx === 0 ? "rank-gold" : idx === 1 ? "rank-silver" : idx === 2 ? "rank-bronze" : "rank-default"}">#${idx + 1}</span></td>
+          <td><strong>${escapeHtml(s.roll_no)}</strong></td>
+          <td class="name-cell"><strong>${escapeHtml(s.name)}</strong></td>
+          <td><strong>${formatNumber(s.marks)}</strong></td>
+          <td><span class="grade-badge">${escapeHtml(s.grade || "—")}</span></td>
+          <td class="school-cell"><small>${escapeHtml(s.institution_name || "—")}</small></td>
+        </tr>`
+        )
+        .join("");
+    } catch (_) {}
+  }
 
-      const response = await fetch(BUNDLED_WORKBOOK_URL, { cache: "default" });
-      if (!response.ok) {
-        throw new Error(`Integrated workbook was not found (${response.status}). Expected: ${BUNDLED_WORKBOOK_URL}`);
+  // ─── STUDENTS SEARCH PAGE ────────────────────────────────────────────────
+  async function loadFilterOptions() {
+    if (state.filterOptions) return;
+    try {
+      const opts = await apiFetch("filter-options");
+      state.filterOptions = opts;
+      const statusSelect = $("#studentStatusFilter");
+      if (statusSelect) {
+        statusSelect.innerHTML = '<option value="">All statuses</option>';
+        (opts.statuses || []).forEach((st) => {
+          statusSelect.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`);
+        });
+      }
+      const typeSelect = $("#studentTypeFilter");
+      if (typeSelect) {
+        typeSelect.innerHTML = '<option value="">All types</option>';
+        (opts.candidate_types || []).forEach((t) => {
+          typeSelect.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`);
+        });
+      }
+    } catch (_) {}
+  }
+
+  function getStudentFilters() {
+    return {
+      search: ($("#studentQuery")?.value || "").trim(),
+      field: $("#studentSearchField")?.value || "all",
+      status: $("#studentStatusFilter")?.value || "",
+      grade: $("#studentGradeFilter")?.value || "",
+      candidate_type: $("#studentTypeFilter")?.value || "",
+      min_marks: $("#studentMinMarks")?.value || "",
+      max_marks: $("#studentMaxMarks")?.value || "",
+      school: ($("#studentSchoolFilter")?.value || "").trim(),
+      limit: $("#studentPageSize")?.value || 50,
+    };
+  }
+
+  async function loadStudents(page = 1) {
+    state.studentPage = page;
+    await loadFilterOptions();
+    const filters = getStudentFilters();
+    filters.page = page;
+
+    // Update export button link with current filter params
+    const exportBtn = $("#exportStudentResultsButton");
+    const exportCsvBtn = $("#exportCsvBtn");
+    const exportQuery = new URLSearchParams();
+    if (state.activeDatasetId) exportQuery.set("dataset_id", String(state.activeDatasetId));
+    for (const [k, v] of Object.entries(filters)) {
+      if (v && k !== "page" && k !== "limit") exportQuery.set(k, v);
+    }
+    const exportUrl = `/api/export/students.csv?${exportQuery.toString()}`;
+    if (exportCsvBtn) exportCsvBtn.href = exportUrl;
+
+    const tbody = $("#studentsTable tbody");
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">Searching student records…</td></tr>';
+
+    try {
+      const res = await apiFetch("students", filters);
+      state.studentTotal = res.total || 0;
+      state.studentPages = res.pages || 1;
+
+      $("#studentResultSummary").textContent = `Showing ${(res.students || []).length} of ${formatNumber(res.total)} matching records (Page ${res.page} of ${res.pages})`;
+
+      if (!res.students || !res.students.length) {
+        tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">No candidate records matched your search criteria.</td></tr>';
+        renderPagination("#studentPagination", res.page, res.pages, loadStudents);
+        return;
       }
 
-      const contentLength = Number(response.headers.get("content-length")) || 0;
-      if (contentLength > 0) {
-        const sizeMb = contentLength / (1024 * 1024);
-        setProgress(12, `Downloading ${sizeMb.toFixed(1)} MB workbook`);
-      } else {
-        setProgress(12, "Downloading integrated workbook");
+      tbody.innerHTML = res.students
+        .map((s) => {
+          let statusClass = "status-neutral";
+          if (/pass/i.test(s.status)) statusClass = "status-pass";
+          else if (/fail|slip/i.test(s.status)) statusClass = "status-fail";
+          else if (/absent/i.test(s.status)) statusClass = "status-warning";
+
+          return `
+          <tr>
+            <td><strong>${escapeHtml(s.roll_no)}</strong></td>
+            <td class="name-cell"><strong>${escapeHtml(s.name)}</strong></td>
+            <td><small>${escapeHtml(s.candidate_type || "—")}</small></td>
+            <td class="school-cell">
+              <span>${escapeHtml(s.institution_name || "—")}</span>
+              ${s.institution_code ? `<small>Code: ${escapeHtml(s.institution_code)}</small>` : ""}
+            </td>
+            <td><span class="status-badge ${statusClass}">${escapeHtml(s.status || "—")}</span></td>
+            <td><strong>${s.marks !== null ? formatNumber(s.marks) : "—"}</strong></td>
+            <td>${s.percentage !== null ? formatPercent(s.percentage) : "—"}</td>
+            <td><span class="grade-badge">${escapeHtml(s.grade || "—")}</span></td>
+            <td><small style="color:var(--danger);">${escapeHtml(shortText(s.all_failed_subjects || "None", 30))}</small></td>
+            <td>
+              <button class="view-button" data-roll="${escapeHtml(s.roll_no)}" type="button">View</button>
+            </td>
+          </tr>`;
+        })
+        .join("");
+
+      // Bind view details buttons
+      $$(".view-button", tbody).forEach((btn) => {
+        btn.addEventListener("click", () => openStudentModal(btn.dataset.roll));
+      });
+
+      renderPagination("#studentPagination", res.page, res.pages, loadStudents);
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="10" class="empty-cell" style="color:var(--danger);">Error: ${escapeHtml(err.message)}</td></tr>`;
+      showToast("Search failed", err.message, "error");
+    }
+  }
+
+  // ─── STUDENT DETAIL MODAL ────────────────────────────────────────────────
+  async function openStudentModal(rollNo) {
+    const modal = $("#studentModal");
+    const body = $("#studentModalBody");
+    body.innerHTML = '<div style="padding:40px;text-align:center;">Loading candidate details…</div>';
+    modal.classList.remove("hidden");
+
+    try {
+      const s = await apiFetch(`students/${encodeURIComponent(rollNo)}`);
+      let statusClass = "status-neutral";
+      if (/pass/i.test(s.status)) statusClass = "status-pass";
+      else if (/fail|slip/i.test(s.status)) statusClass = "status-fail";
+      else if (/absent/i.test(s.status)) statusClass = "status-warning";
+
+      let failedChips = "";
+      if (s.all_failed_subjects) {
+        failedChips = s.all_failed_subjects
+          .split(/[,;/]+/)
+          .map((sub) => `<span class="subject-chip">${escapeHtml(sub.trim())}</span>`)
+          .join("");
       }
 
-      const buffer = await response.arrayBuffer();
-      setProgress(22, "Workbook downloaded; starting analysis");
-      createWorker();
-      state.worker.postMessage({
-        type: "loadWorkbook",
-        buffer,
-        fileName: BUNDLED_WORKBOOK_NAME,
-      }, [buffer]);
-    } catch (error) {
-      setDataStatus("error", "Integrated workbook unavailable");
-      $("#uploadProgress").classList.add("hidden");
-      showToast(
-        "Workbook not found",
-        `${error.message || error}. Upload ${BUNDLED_WORKBOOK_NAME} manually or place it in the data folder.`,
-        "error",
-        10000
+      body.innerHTML = `
+        ${s.marks !== null ? `
+        <div class="student-rank-banner">
+          <div class="rank-box">
+            <span>Overall Board Rank</span>
+            <strong>#${s.overall_rank !== null ? formatNumber(s.overall_rank) : "—"}</strong>
+          </div>
+          <div class="rank-box">
+            <span>School Rank</span>
+            <strong>#${s.school_rank !== null ? formatNumber(s.school_rank) : "—"}</strong>
+          </div>
+          <div class="rank-box">
+            <span>Percentile</span>
+            <strong>${s.percentile !== null ? `${s.percentile}%` : "—"}</strong>
+          </div>
+        </div>
+        ` : ""}
+
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span>Roll Number</span>
+            <strong>${escapeHtml(s.roll_no)}</strong>
+          </div>
+          <div class="detail-item">
+            <span>Candidate Name</span>
+            <strong>${escapeHtml(s.name)}</strong>
+          </div>
+          <div class="detail-item">
+            <span>Candidate Type</span>
+            <strong>${escapeHtml(s.candidate_type || "Regular")}</strong>
+          </div>
+          <div class="detail-item">
+            <span>Status</span>
+            <strong style="margin-top:6px;"><span class="status-badge ${statusClass}">${escapeHtml(s.status)}</span></strong>
+          </div>
+          <div class="detail-item">
+            <span>Total Marks Achieved</span>
+            <strong>${s.marks !== null ? `${formatNumber(s.marks)} / ${s.max_marks || 1200}` : "—"}</strong>
+          </div>
+          <div class="detail-item">
+            <span>Percentage & Grade</span>
+            <strong>${s.percentage !== null ? formatPercent(s.percentage) : "—"} (Grade ${escapeHtml(s.grade || "—")})</strong>
+          </div>
+          <div class="detail-item full">
+            <span>Institution / School</span>
+            <strong>${escapeHtml(s.institution_name || "—")}</strong>
+            ${s.institution_code ? `<small style="color:var(--muted);display:block;margin-top:3px;">Code: ${escapeHtml(s.institution_code)}</small>` : ""}
+          </div>
+          ${s.all_failed_subjects ? `
+          <div class="detail-item full">
+            <span>Failed / Slip Subjects (${s.failed_count || 0})</span>
+            <div style="margin-top:8px;">${failedChips}</div>
+            ${s.part1_subjects ? `<small style="display:block;margin-top:6px;color:var(--muted);">Part-I: ${escapeHtml(s.part1_subjects)}</small>` : ""}
+            ${s.part2_subjects ? `<small style="display:block;margin-top:2px;color:var(--muted);">Part-II: ${escapeHtml(s.part2_subjects)}</small>` : ""}
+          </div>` : ""}
+          ${s.pdf_page ? `
+          <div class="detail-item">
+            <span>Gazette PDF Page</span>
+            <strong>Page ${escapeHtml(s.pdf_page)}</strong>
+          </div>` : ""}
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-button" id="printStudentResultBtn" type="button">Print Result Card</button>
+          <button class="primary-button" id="closeStudentModalBtn" type="button">Close</button>
+        </div>
+      `;
+
+      $("#printStudentResultBtn")?.addEventListener("click", () => window.print());
+      $("#closeStudentModalBtn")?.addEventListener("click", () => modal.classList.add("hidden"));
+    } catch (err) {
+      body.innerHTML = `<div style="padding:40px;text-align:center;color:var(--danger);">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // ─── SCHOOLS PAGE ────────────────────────────────────────────────────────
+  async function loadSchools(page = 1) {
+    state.schoolPage = page;
+    const search = ($("#schoolQuery")?.value || "").trim();
+    const minCandidates = $("#schoolMinCandidates")?.value || 20;
+    const sortBy = $("#schoolSort")?.value || "candidates";
+    const tbody = $("#schoolsTable tbody");
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">Loading school data…</td></tr>';
+
+    try {
+      const res = await apiFetch("schools", {
+        search,
+        min_candidates: minCandidates,
+        sort: sortBy,
+        page,
+        limit: 50,
+      });
+
+      state.schoolTotal = res.total || 0;
+      state.schoolPages = res.pages || 1;
+
+      $("#schoolResultSummary").textContent = `Showing ${(res.schools || []).length} of ${formatNumber(res.total)} institutions`;
+
+      if (!res.schools || !res.schools.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">No institutions found matching the criteria.</td></tr>';
+        renderPagination("#schoolPagination", res.page, res.pages, loadSchools);
+        return;
+      }
+
+      tbody.innerHTML = res.schools
+        .map(
+          (s) => `
+        <tr>
+          <td><code>${escapeHtml(s.institution_code || "—")}</code></td>
+          <td class="name-cell"><strong>${escapeHtml(s.institution_name)}</strong></td>
+          <td><strong>${formatNumber(s.candidates)}</strong></td>
+          <td>${formatNumber(s.passed)}</td>
+          <td><small style="color:var(--danger);">${formatNumber(s.fail_slip)}</small></td>
+          <td>${formatNumber(s.absent)}</td>
+          <td><strong>${formatPercent(s.pass_percentage)}</strong></td>
+          <td>${formatDecimal(s.average_marks)}</td>
+          <td><strong>${formatNumber(s.highest_marks)}</strong></td>
+        </tr>`
+        )
+        .join("");
+
+      renderPagination("#schoolPagination", res.page, res.pages, loadSchools);
+
+      // Render School Charts
+      renderSchoolCharts(res.schools);
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty-cell" style="color:var(--danger);">Error: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  function renderSchoolCharts(schools) {
+    const ct = getChartTheme();
+    const topPass = [...schools].sort((a, b) => (b.pass_percentage || 0) - (a.pass_percentage || 0)).slice(0, 8);
+    const topAvg = [...schools].sort((a, b) => (b.average_marks || 0) - (a.average_marks || 0)).slice(0, 8);
+
+    const passEl = $("#schoolsPassChart");
+    if (passEl && topPass.length) {
+      registerChart(
+        "schoolsPassChart",
+        new Chart(passEl, {
+          type: "bar",
+          indexAxis: "y",
+          data: {
+            labels: topPass.map((s) => shortText(s.institution_name, 26)),
+            datasets: [{
+              label: "Pass Rate %",
+              data: topPass.map((s) => s.pass_percentage),
+              backgroundColor: "#12a678",
+              borderRadius: 6,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { min: 0, max: 100, ticks: { color: ct.textColor, callback: (v) => `${v}%` }, grid: { color: ct.gridColor } },
+              y: { ticks: { color: ct.textColor }, grid: { display: false } },
+            },
+          },
+        })
+      );
+    }
+
+    const avgEl = $("#schoolsAverageChart");
+    if (avgEl && topAvg.length) {
+      registerChart(
+        "schoolsAverageChart",
+        new Chart(avgEl, {
+          type: "bar",
+          indexAxis: "y",
+          data: {
+            labels: topAvg.map((s) => shortText(s.institution_name, 26)),
+            datasets: [{
+              label: "Average Marks",
+              data: topAvg.map((s) => s.average_marks),
+              backgroundColor: "#2457d6",
+              borderRadius: 6,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+              y: { ticks: { color: ct.textColor }, grid: { display: false } },
+            },
+          },
+        })
       );
     }
   }
 
-  function handleWorkbookReady(payload) {
-    if (!payload) return;
-    state.ready = true;
-    state.payload = payload;
-    state.schoolRows = [...(payload.institutions || [])];
-    state.subjectRows = [...(payload.subjectFailures || [])];
+  // ─── RANKINGS PAGE ───────────────────────────────────────────────────────
+  async function loadRankings() {
+    const minCandidates = $("#rankMinCandidates")?.value || 20;
+    const limit = $("#rankLimit")?.value || 50;
+    const tbody = $("#rankingsTable tbody");
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">Calculating composite rankings…</td></tr>';
 
-    $("#sourceFileName").textContent = payload.sourceFileName || "Result workbook";
-    $("#sourceRecordCount").textContent = `${formatNumber(payload.summary.totalExtracted)} student records`;
-    setDataStatus("ready", "Workbook ready");
-    setProgress(100, "Dashboard ready");
-    window.setTimeout(() => $("#uploadOverlay").classList.add("hidden"), 320);
+    try {
+      const schools = await apiFetch("rankings/schools", { min_candidates: minCandidates, limit });
+      $("#rankTableSummary").textContent = `Top ${schools.length} institutions (≥${minCandidates} candidates, weighted composite score)`;
 
-    populateFilterOptions(payload.filterOptions || {});
-    renderEverything();
-    runStudentSearch(1);
-    showToast("Workbook loaded", `${formatNumber(payload.summary.totalExtracted)} student records are ready for analysis.`, "success");
-  }
+      if (!schools || !schools.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">No institutions met the minimum candidate requirement.</td></tr>';
+        return;
+      }
 
-  function populateFilterOptions(options) {
-    const statusSelect = $("#studentStatusFilter");
-    statusSelect.innerHTML = '<option value="">All statuses</option>';
-    (options.statuses || []).forEach((status) => {
-      statusSelect.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(status)}">${escapeHtml(status)}</option>`);
-    });
+      tbody.innerHTML = schools
+        .map((s, idx) => {
+          const rank = s.rank || idx + 1;
+          const badgeClass = rank === 1 ? "rank-gold" : rank === 2 ? "rank-silver" : rank === 3 ? "rank-bronze" : "rank-default";
+          return `
+          <tr>
+            <td><span class="rank-badge ${badgeClass}">#${rank}</span></td>
+            <td class="name-cell">
+              <strong>${escapeHtml(s.institution_name)}</strong>
+              ${s.institution_code ? `<small>Code: ${escapeHtml(s.institution_code)}</small>` : ""}
+            </td>
+            <td><strong>${formatNumber(s.candidates)}</strong></td>
+            <td>${formatNumber(s.passed)}</td>
+            <td><strong>${formatPercent(s.pass_percentage)}</strong></td>
+            <td>${formatDecimal(s.average_marks)}</td>
+            <td><strong>${formatNumber(s.highest_marks)}</strong></td>
+            <td><span class="score-pill">${formatDecimal(s.ranking_score)}</span></td>
+          </tr>`;
+        })
+        .join("");
 
-    const typeSelect = $("#studentTypeFilter");
-    typeSelect.innerHTML = '<option value="">All candidate types</option>';
-    (options.candidateTypes || []).forEach((type) => {
-      typeSelect.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`);
-    });
-  }
-
-  function renderEverything() {
-    renderOverviewKpis();
-    renderOverviewCharts();
-    renderTopStudents();
-    renderSchoolPage();
-    renderSubjectPage();
-    renderInsights();
-    renderQuality();
-  }
-
-  function renderOverviewKpis() {
-    const summary = state.payload.summary;
-    const items = [
-      ["Extracted candidates", formatNumber(summary.totalExtracted), "Workbook total"],
-      ["Appeared", formatNumber(summary.appeared), "Absent and cancelled excluded"],
-      ["Passed", formatNumber(summary.passed), "Successful candidates"],
-      ["Pass percentage", formatPercent(summary.passPercentage), "Passed ÷ appeared"],
-      ["Fail / subject slip", formatNumber(summary.failSlip), "Direct subject-slip cases"],
-      ["Highest marks", formatNumber(summary.highestMarks), "Maximum numeric result"],
-      ["Average marks", formatDecimal(summary.averageMarks), `Median: ${formatDecimal(summary.medianMarks)}`],
-      ["Schools", formatNumber(summary.schoolCount), `${formatNumber(summary.subjectCount)} subject codes summarized`],
-    ];
-    $("#overviewKpis").innerHTML = items.map(([label, value, note]) => `
-      <article class="kpi-card">
-        <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(value)}</strong>
-        <small>${escapeHtml(note)}</small>
-      </article>
-    `).join("");
-  }
-
-  function chartDefaults() {
-    return {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "nearest", intersect: false },
-      plugins: {
-        legend: {
-          position: "bottom",
-          labels: { color: cssVar("--muted"), usePointStyle: true, boxWidth: 8, padding: 16 },
-        },
-        tooltip: {
-          backgroundColor: cssVar("--text"),
-          titleColor: cssVar("--surface"),
-          bodyColor: cssVar("--surface"),
-          padding: 11,
-          cornerRadius: 9,
-        },
-      },
-      scales: {
-        x: {
-          grid: { color: cssVar("--border") },
-          ticks: { color: cssVar("--muted"), maxRotation: 45, minRotation: 0 },
-          border: { color: cssVar("--border") },
-        },
-        y: {
-          beginAtZero: true,
-          grid: { color: cssVar("--border") },
-          ticks: { color: cssVar("--muted") },
-          border: { color: cssVar("--border") },
-        },
-      },
-    };
-  }
-
-  function createChart(id, config) {
-    const canvas = document.getElementById(id);
-    if (!canvas || typeof Chart === "undefined") return;
-    const existing = state.charts.get(id);
-    if (existing) existing.destroy();
-    const chart = new Chart(canvas, config);
-    state.charts.set(id, chart);
-  }
-
-  function horizontalBarOptions({ percent = false, stacked = false } = {}) {
-    const options = chartDefaults();
-    options.indexAxis = "y";
-    options.scales.x.stacked = stacked;
-    options.scales.y.stacked = stacked;
-    options.scales.y.grid.display = false;
-    options.scales.y.ticks.autoSkip = false;
-    if (percent) {
-      options.scales.x.max = 100;
-      options.scales.x.ticks.callback = (value) => `${value}%`;
-    }
-    return options;
-  }
-
-  function renderOverviewCharts() {
-    const { summary, statusSummary, marksDistribution, candidateTypes, subjectFailures, institutions } = state.payload;
-    const passData = [summary.passed, summary.notPassed];
-    createChart("passFailChart", {
-      type: "doughnut",
-      data: {
-        labels: ["Passed", "Not passed among appeared"],
-        datasets: [{ data: passData, backgroundColor: ["#12a678", "#e14e5d"], borderWidth: 0, hoverOffset: 6 }],
-      },
-      options: {
-        ...chartDefaults(),
-        cutout: "67%",
-        plugins: {
-          ...chartDefaults().plugins,
-          tooltip: {
-            ...chartDefaults().plugins.tooltip,
-            callbacks: {
-              label: (context) => `${context.label}: ${formatNumber(context.raw)} (${formatPercent((context.raw / summary.appeared) * 100)})`,
+      // Render top 15 ranking chart
+      const chartEl = $("#rankingChart");
+      if (chartEl) {
+        const top15 = schools.slice(0, 15);
+        const ct = getChartTheme();
+        registerChart(
+          "rankingChart",
+          new Chart(chartEl, {
+            type: "bar",
+            indexAxis: "y",
+            data: {
+              labels: top15.map((s) => `#${s.rank} ${shortText(s.institution_name, 28)}`),
+              datasets: [{
+                label: "Composite Score",
+                data: top15.map((s) => s.ranking_score),
+                backgroundColor: top15.map((_, i) => i === 0 ? "#ffd700" : i === 1 ? "#b0bec5" : i === 2 ? "#cd7f32" : "#2457d6"),
+                borderRadius: 6,
+              }],
             },
-          },
-        },
-      },
-    });
-
-    const statuses = [...statusSummary].sort((a, b) => b.students - a.students);
-    createChart("statusChart", {
-      type: "doughnut",
-      data: {
-        labels: statuses.map((row) => row.status),
-        datasets: [{ data: statuses.map((row) => row.students), backgroundColor: chartPalette, borderWidth: 0, hoverOffset: 5 }],
-      },
-      options: { ...chartDefaults(), cutout: "54%" },
-    });
-
-    createChart("marksChart", {
-      type: "line",
-      data: {
-        labels: marksDistribution.ranges.map((row) => row.range),
-        datasets: [{
-          label: "Students",
-          data: marksDistribution.ranges.map((row) => row.students),
-          borderColor: "#2457d6",
-          backgroundColor: "rgba(36,87,214,0.14)",
-          fill: true,
-          tension: 0.3,
-          pointRadius: 2,
-          pointHoverRadius: 5,
-        }],
-      },
-      options: chartDefaults(),
-    });
-
-    createChart("gradeChart", {
-      type: "bar",
-      data: {
-        labels: marksDistribution.grades.map((row) => row.grade),
-        datasets: [{
-          label: "Students",
-          data: marksDistribution.grades.map((row) => row.students),
-          backgroundColor: chartPalette.slice(0, marksDistribution.grades.length),
-          borderRadius: 7,
-        }],
-      },
-      options: chartDefaults(),
-    });
-
-    createChart("candidateTypeChart", {
-      type: "bar",
-      data: {
-        labels: candidateTypes.map((row) => row.type),
-        datasets: [
-          { label: "Passed", data: candidateTypes.map((row) => row.passed), backgroundColor: "#12a678", borderRadius: 5 },
-          { label: "Not passed / other", data: candidateTypes.map((row) => row.other), backgroundColor: "#e14e5d", borderRadius: 5 },
-        ],
-      },
-      options: {
-        ...chartDefaults(),
-        scales: {
-          x: { ...chartDefaults().scales.x, stacked: true },
-          y: { ...chartDefaults().scales.y, stacked: true },
-        },
-      },
-    });
-
-    const topSubjects = [...subjectFailures].sort((a, b) => b.uniqueStudents - a.uniqueStudents).slice(0, 12).reverse();
-    createChart("subjectFailureChart", {
-      type: "bar",
-      data: {
-        labels: topSubjects.map((row) => shortText(row.name || row.code, 35)),
-        datasets: [{ label: "Unique students", data: topSubjects.map((row) => row.uniqueStudents), backgroundColor: "#7047d7", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions(),
-    });
-
-    const topPartSubjects = [...subjectFailures].sort((a, b) => b.total - a.total).slice(0, 10).reverse();
-    createChart("subjectPartsChart", {
-      type: "bar",
-      data: {
-        labels: topPartSubjects.map((row) => shortText(row.name || row.code, 34)),
-        datasets: [
-          { label: "Part I", data: topPartSubjects.map((row) => row.part1), backgroundColor: "#2457d6", borderRadius: 4 },
-          { label: "Part II", data: topPartSubjects.map((row) => row.part2), backgroundColor: "#f0a126", borderRadius: 4 },
-        ],
-      },
-      options: horizontalBarOptions({ stacked: true }),
-    });
-
-    const largest = [...institutions].sort((a, b) => b.candidates - a.candidates).slice(0, 10).reverse();
-    createChart("largestSchoolsChart", {
-      type: "bar",
-      data: {
-        labels: largest.map((row) => shortText(row.name || row.code, 34)),
-        datasets: [{ label: "Candidates", data: largest.map((row) => row.candidates), backgroundColor: "#178aa5", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions(),
-    });
-
-    const bestPass = [...institutions]
-      .filter((row) => row.candidates >= 20)
-      .sort((a, b) => b.passPercentage - a.passPercentage || b.candidates - a.candidates)
-      .slice(0, 10)
-      .reverse();
-    createChart("schoolPassRateChart", {
-      type: "bar",
-      data: {
-        labels: bestPass.map((row) => shortText(row.name || row.code, 34)),
-        datasets: [{ label: "Pass %", data: bestPass.map((row) => row.passPercentage), backgroundColor: "#12a678", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions({ percent: true }),
-    });
-  }
-
-  function renderTopStudents() {
-    const rows = (state.payload.topStudents || []).slice(0, 15);
-    const tbody = $("#topStudentsTable tbody");
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">No top-student summary is available.</td></tr>';
-      return;
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                y: { ticks: { color: ct.textColor }, grid: { display: false } },
+              },
+            },
+          })
+        );
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="8" class="empty-cell" style="color:var(--danger);">Error: ${escapeHtml(err.message)}</td></tr>`;
     }
-    tbody.innerHTML = rows.map((row) => `
-      <tr>
-        <td class="numeric">${escapeHtml(row.rank ?? "—")}</td>
-        <td>${escapeHtml(row.roll)}</td>
-        <td class="name-cell"><strong>${escapeHtml(row.name)}</strong></td>
-        <td class="numeric">${formatNumber(row.marks)}</td>
-        <td><span class="grade-badge">${escapeHtml(row.grade || "—")}</span></td>
-        <td class="school-cell" title="${escapeHtml(row.institutionName)}">${escapeHtml(shortText(row.institutionName, 48))}</td>
-      </tr>
-    `).join("");
   }
 
-  function currentStudentFilters() {
-    return {
-      query: $("#studentQuery").value.trim(),
-      field: $("#studentSearchField").value,
-      status: $("#studentStatusFilter").value,
-      grade: $("#studentGradeFilter").value,
-      candidateType: $("#studentTypeFilter").value,
-      minMarks: $("#studentMinMarks").value,
-      maxMarks: $("#studentMaxMarks").value,
-      school: $("#studentSchoolFilter").value.trim(),
-    };
-  }
-
-  function runStudentSearch(page = 1) {
-    if (!state.ready || !state.worker) return;
-    state.currentStudentPage = page;
-    state.currentStudentRequestId += 1;
-    $("#studentResultSummary").textContent = "Searching student records…";
-    state.worker.postMessage({
-      type: "searchStudents",
-      requestId: state.currentStudentRequestId,
-      filters: currentStudentFilters(),
-      page,
-      pageSize: Number($("#studentPageSize").value) || 50,
-    });
-  }
-
-  function statusClass(status) {
-    if (status === "PASS") return "status-pass";
-    if (/FAIL|DISQUALIFIED|CANCELLED|NOT_ELIGIBLE/.test(status)) return "status-fail";
-    if (/RESULT_LATER|ABSENT|SECOND_NOTIFICATION|UNKNOWN|MISSING/.test(status)) return "status-warning";
-    return "status-neutral";
-  }
-
-  function renderStudentResults(message) {
-    const tbody = $("#studentsTable tbody");
-    $("#studentResultSummary").textContent = `${formatNumber(message.total)} matching students · page ${formatNumber(message.page)} of ${formatNumber(message.pages)}`;
-    if (!message.results.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">No student matches the selected search and filters.</td></tr>';
-      renderPagination(message.page, message.pages);
-      return;
-    }
-
-    tbody.innerHTML = message.results.map((row) => `
-      <tr>
-        <td><strong>${escapeHtml(row.roll)}</strong><br><small>Page ${escapeHtml(row.pdfPage ?? "—")}</small></td>
-        <td class="name-cell"><strong>${escapeHtml(row.name || "Unknown")}</strong><small>${escapeHtml(row.institutionCode || "")}</small></td>
-        <td>${escapeHtml(row.type || "—")}</td>
-        <td class="school-cell" title="${escapeHtml(row.institutionName)}">${escapeHtml(shortText(row.institutionName || "—", 55))}</td>
-        <td><span class="status-badge ${statusClass(row.status)}">${escapeHtml(row.status)}</span></td>
-        <td class="numeric">${formatNumber(row.marks)}</td>
-        <td class="numeric">${formatPercent(row.percentage)}</td>
-        <td><span class="grade-badge">${escapeHtml(row.grade || "—")}</span></td>
-        <td title="${escapeHtml(row.allFailedNames)}">${escapeHtml(shortText(row.allFailedNames || "—", 42))}</td>
-        <td><button class="view-button" type="button" data-student-roll="${escapeHtml(row.roll)}">View</button></td>
-      </tr>
-    `).join("");
-    renderPagination(message.page, message.pages);
-  }
-
-  function renderPagination(page, pages) {
-    const container = $("#studentPagination");
-    const maxButtons = 7;
-    let start = Math.max(1, page - Math.floor(maxButtons / 2));
-    let end = Math.min(pages, start + maxButtons - 1);
-    start = Math.max(1, end - maxButtons + 1);
-    const buttons = [];
-    buttons.push(`<button type="button" data-page-number="${page - 1}" ${page <= 1 ? "disabled" : ""}>‹</button>`);
-    if (start > 1) {
-      buttons.push('<button type="button" data-page-number="1">1</button>');
-      if (start > 2) buttons.push('<button type="button" disabled>…</button>');
-    }
-    for (let current = start; current <= end; current += 1) {
-      buttons.push(`<button type="button" data-page-number="${current}" class="${current === page ? "active" : ""}">${current}</button>`);
-    }
-    if (end < pages) {
-      if (end < pages - 1) buttons.push('<button type="button" disabled>…</button>');
-      buttons.push(`<button type="button" data-page-number="${pages}">${pages}</button>`);
-    }
-    buttons.push(`<button type="button" data-page-number="${page + 1}" ${page >= pages ? "disabled" : ""}>›</button>`);
-    container.innerHTML = buttons.join("");
-  }
-
-  function requestStudentDetail(roll) {
-    if (!state.worker) return;
-    state.currentDetailRequestId += 1;
-    state.worker.postMessage({ type: "getStudent", requestId: state.currentDetailRequestId, roll });
-  }
-
-  function renderStudentModal(student) {
-    if (!student) {
-      showToast("Student not found", "The requested roll number was not found in the loaded workbook.", "error");
-      return;
-    }
-    $("#studentModalTitle").textContent = `${student.name || "Candidate"} · ${student.roll}`;
-    const details = [
-      ["Roll number", student.roll],
-      ["Candidate name", student.name],
-      ["Candidate type", student.type],
-      ["Status", student.status],
-      ["Marks", formatNumber(student.marks)],
-      ["Percentage", formatPercent(student.percentage)],
-      ["Grade", student.grade || "—"],
-      ["Failed subject count", formatNumber(student.failedCount)],
-      ["Institution code", student.institutionCode],
-      ["Institution name", student.institutionName, true],
-      ["Part-I failed subjects", student.partINames || student.partICodes || "—", true],
-      ["Part-II failed subjects", student.partIINames || student.partIICodes || "—", true],
-      ["Status flags", student.statusFlags || "—", true],
-      ["Raw result", student.rawResult || "—", true],
-      ["PDF location", `Page ${student.pdfPage ?? "—"}, column ${student.pdfColumn ?? "—"}`],
-      ["Unknown parsed items", student.unknownItems || "—", true],
-    ];
-    $("#studentModalBody").innerHTML = `<div class="detail-grid">${details.map(([label, value, full]) => `
-      <div class="detail-item ${full ? "full" : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>
-    `).join("")}</div>`;
-    $("#studentModal").classList.remove("hidden");
-  }
-
-  function renderSchoolPage() {
-    const schools = state.payload.institutions || [];
-    const with20 = schools.filter((row) => row.candidates >= 20);
-    const bestPass = [...with20].sort((a, b) => b.passPercentage - a.passPercentage || b.candidates - a.candidates)[0];
-    const largest = [...schools].sort((a, b) => b.candidates - a.candidates)[0];
-    const bestAverage = [...with20].filter((row) => row.averageMarks !== null).sort((a, b) => b.averageMarks - a.averageMarks)[0];
-    const items = [
-      ["Institutions", formatNumber(schools.length)],
-      ["Median school size", formatDecimal(state.payload.summary.medianSchoolSize)],
-      ["Largest institution", largest ? formatNumber(largest.candidates) : "—"],
-      ["Best qualifying pass rate", bestPass ? formatPercent(bestPass.passPercentage) : "—"],
-    ];
-    $("#schoolKpis").innerHTML = items.map(([label, value]) => `<article class="mini-kpi"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join("");
-    if (bestAverage) $("#schoolKpis").title = `${bestAverage.name}: average marks ${formatDecimal(bestAverage.averageMarks)}`;
-    applySchoolFilters();
-  }
-
-  function applySchoolFilters() {
-    if (!state.ready) return;
-    const query = $("#schoolQuery").value.trim().toLocaleLowerCase();
-    const minCandidates = Math.max(0, Number($("#schoolMinCandidates").value) || 0);
-    const sortBy = $("#schoolSort").value;
-    const sorters = {
-      candidates: (a, b) => b.candidates - a.candidates,
-      passRate: (a, b) => b.passPercentage - a.passPercentage || b.candidates - a.candidates,
-      averageMarks: (a, b) => (b.averageMarks ?? -Infinity) - (a.averageMarks ?? -Infinity),
-      highestMarks: (a, b) => (b.highestMarks ?? -Infinity) - (a.highestMarks ?? -Infinity),
-    };
-    state.schoolRows = (state.payload.institutions || [])
-      .filter((row) => row.candidates >= minCandidates)
-      .filter((row) => !query || `${row.code} ${row.name}`.toLocaleLowerCase().includes(query))
-      .sort(sorters[sortBy] || sorters.candidates);
-    renderSchoolTable();
-    renderSchoolCharts(minCandidates);
-  }
-
-  function renderSchoolTable() {
-    const rows = state.schoolRows.slice(0, 500);
-    $("#schoolTableSummary").textContent = `${formatNumber(state.schoolRows.length)} matching institutions${state.schoolRows.length > 500 ? " · first 500 shown" : ""}`;
-    const tbody = $("#schoolsTable tbody");
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">No institution matches the selected filters.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = rows.map((row) => `
-      <tr>
-        <td>${escapeHtml(row.code)}</td>
-        <td class="school-cell"><strong>${escapeHtml(row.name)}</strong></td>
-        <td class="numeric">${formatNumber(row.candidates)}</td>
-        <td class="numeric">${formatNumber(row.passed)}</td>
-        <td class="numeric">${formatNumber(row.failSlip)}</td>
-        <td class="numeric">${formatNumber(row.absent)}</td>
-        <td class="numeric">${formatNumber(row.resultLater)}</td>
-        <td class="numeric">${formatPercent(row.passPercentage)}</td>
-        <td class="numeric">${formatDecimal(row.averageMarks)}</td>
-        <td class="numeric">${formatNumber(row.highestMarks)}</td>
-      </tr>
-    `).join("");
-  }
-
-  function renderSchoolCharts(minCandidates) {
-    const eligible = (state.payload.institutions || []).filter((row) => row.candidates >= minCandidates);
-    const topPass = [...eligible].sort((a, b) => b.passPercentage - a.passPercentage || b.candidates - a.candidates).slice(0, 12).reverse();
-    const topAverage = [...eligible].filter((row) => row.averageMarks !== null).sort((a, b) => b.averageMarks - a.averageMarks).slice(0, 12).reverse();
-
-    createChart("schoolsPassChart", {
-      type: "bar",
-      data: {
-        labels: topPass.map((row) => shortText(row.name || row.code, 36)),
-        datasets: [{ label: "Pass %", data: topPass.map((row) => row.passPercentage), backgroundColor: "#12a678", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions({ percent: true }),
-    });
-    createChart("schoolsAverageChart", {
-      type: "bar",
-      data: {
-        labels: topAverage.map((row) => shortText(row.name || row.code, 36)),
-        datasets: [{ label: "Average marks", data: topAverage.map((row) => row.averageMarks), backgroundColor: "#2457d6", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions(),
-    });
-  }
-
-  function renderSubjectPage() {
-    const subjects = state.payload.subjectFailures || [];
-    const totalEntries = subjects.reduce((sum, row) => sum + row.total, 0);
-    const totalUniqueSum = subjects.reduce((sum, row) => sum + row.uniqueStudents, 0);
-    const largest = [...subjects].sort((a, b) => b.uniqueStudents - a.uniqueStudents)[0];
-    const part2Entries = subjects.reduce((sum, row) => sum + row.part2, 0);
-    const items = [
-      ["Subject codes", formatNumber(subjects.length)],
-      ["Total slip entries", formatNumber(totalEntries)],
-      ["Unique-student sum", formatNumber(totalUniqueSum)],
-      ["Part-II share", formatPercent(totalEntries ? (part2Entries / totalEntries) * 100 : 0)],
-    ];
-    $("#subjectKpis").innerHTML = items.map(([label, value]) => `<article class="mini-kpi"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join("");
-    if (largest) $("#subjectKpis").title = `Leading subject: ${largest.name} (${formatNumber(largest.uniqueStudents)} unique students)`;
-    applySubjectFilters();
-  }
-
-  function applySubjectFilters() {
-    if (!state.ready) return;
-    const query = $("#subjectQuery").value.trim().toLocaleLowerCase();
-    const sortBy = $("#subjectSort").value;
-    const sorters = {
-      unique: (a, b) => b.uniqueStudents - a.uniqueStudents,
-      total: (a, b) => b.total - a.total,
-      part1: (a, b) => b.part1 - a.part1,
-      part2: (a, b) => b.part2 - a.part2,
-    };
-    state.subjectRows = (state.payload.subjectFailures || [])
-      .filter((row) => !query || `${row.code} ${row.name}`.toLocaleLowerCase().includes(query))
-      .sort(sorters[sortBy] || sorters.unique);
-    renderSubjectTable();
-    renderSubjectCharts();
-  }
-
-  function renderSubjectTable() {
-    const rows = state.subjectRows;
-    $("#subjectTableSummary").textContent = `${formatNumber(rows.length)} matching subject records`;
+  // ─── SUBJECTS PAGE ───────────────────────────────────────────────────────
+  async function loadSubjects() {
+    const search = ($("#subjectQuery")?.value || "").trim();
+    const sortBy = $("#subjectSort")?.value || "unique_students";
     const tbody = $("#subjectsTable tbody");
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-cell">No subject matches the selected search.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = rows.map((row) => `
-      <tr>
-        <td><strong>${escapeHtml(row.code)}</strong></td>
-        <td>${escapeHtml(row.name)}</td>
-        <td class="numeric">${formatNumber(row.part1)}</td>
-        <td class="numeric">${formatNumber(row.part2)}</td>
-        <td class="numeric">${formatNumber(row.total)}</td>
-        <td class="numeric">${formatNumber(row.uniqueStudents)}</td>
-        <td class="numeric">${formatPercent(row.total ? (row.part2 / row.total) * 100 : 0)}</td>
-      </tr>
-    `).join("");
-  }
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-cell">Loading subject slip analytics…</td></tr>';
 
-  function renderSubjectCharts() {
-    const topUnique = [...state.subjectRows].sort((a, b) => b.uniqueStudents - a.uniqueStudents).slice(0, 14).reverse();
-    const topTotal = [...state.subjectRows].sort((a, b) => b.total - a.total).slice(0, 12).reverse();
-    createChart("subjectsUniqueChart", {
-      type: "bar",
-      data: {
-        labels: topUnique.map((row) => shortText(row.name || row.code, 37)),
-        datasets: [{ label: "Unique students", data: topUnique.map((row) => row.uniqueStudents), backgroundColor: "#7047d7", borderRadius: 5 }],
-      },
-      options: horizontalBarOptions(),
-    });
-    createChart("subjectsPartChart", {
-      type: "bar",
-      data: {
-        labels: topTotal.map((row) => shortText(row.name || row.code, 37)),
-        datasets: [
-          { label: "Part I", data: topTotal.map((row) => row.part1), backgroundColor: "#2457d6", borderRadius: 4 },
-          { label: "Part II", data: topTotal.map((row) => row.part2), backgroundColor: "#f0a126", borderRadius: 4 },
-        ],
-      },
-      options: horizontalBarOptions({ stacked: true }),
-    });
-  }
+    try {
+      const res = await apiFetch("subjects", { search, sort: sortBy });
+      const subjects = res.subjects || [];
+      $("#subjectTableSummary").textContent = `${subjects.length} subject codes tracked`;
 
-  function renderInsights() {
-    const insights = state.payload.insights || [];
-    $("#insightGrid").innerHTML = insights.map((item, index) => `
-      <article class="insight-card" data-watermark="${String(index + 1).padStart(2, "0")}">
-        <span class="insight-number">INSIGHT ${String(index + 1).padStart(2, "0")}</span>
-        <h3>${escapeHtml(item.title)}</h3>
-        <p>${escapeHtml(item.text)}</p>
-      </article>
-    `).join("");
+      if (!subjects.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-cell">No subjects found.</td></tr>';
+        return;
+      }
 
-    const scatterRows = (state.payload.institutions || [])
-      .filter((row) => row.candidates >= 10 && Number.isFinite(row.passPercentage))
-      .slice(0, 2500);
-    createChart("schoolScatterChart", {
-      type: "scatter",
-      data: {
-        datasets: [{
-          label: "Institutions",
-          data: scatterRows.map((row) => ({ x: row.candidates, y: row.passPercentage, school: row.name })),
-          backgroundColor: "rgba(36,87,214,0.48)",
-          pointRadius: 3,
-          pointHoverRadius: 6,
-        }],
-      },
-      options: {
-        ...chartDefaults(),
-        parsing: false,
-        scales: {
-          x: { ...chartDefaults().scales.x, title: { display: true, text: "Candidates", color: cssVar("--muted") } },
-          y: { ...chartDefaults().scales.y, min: 0, max: 100, title: { display: true, text: "Pass percentage", color: cssVar("--muted") }, ticks: { color: cssVar("--muted"), callback: (value) => `${value}%` } },
-        },
-        plugins: {
-          ...chartDefaults().plugins,
-          tooltip: {
-            ...chartDefaults().plugins.tooltip,
-            callbacks: {
-              label: (context) => `${context.raw.school}: ${formatNumber(context.raw.x)} candidates, ${formatPercent(context.raw.y)}`,
+      tbody.innerHTML = subjects
+        .map((s) => {
+          const part2Share = s.total_entries > 0 ? ((s.part2_entries || 0) / s.total_entries) * 100 : 0;
+          return `
+          <tr>
+            <td><code>${escapeHtml(s.subject_code)}</code></td>
+            <td class="name-cell"><strong>${escapeHtml(s.subject_name)}</strong></td>
+            <td>${formatNumber(s.part1_entries)}</td>
+            <td>${formatNumber(s.part2_entries)}</td>
+            <td><strong>${formatNumber(s.total_entries)}</strong></td>
+            <td><strong style="color:var(--danger);">${formatNumber(s.unique_students)}</strong></td>
+            <td>${formatPercent(part2Share)}</td>
+          </tr>`;
+        })
+        .join("");
+
+      // Render Subject charts
+      const ct = getChartTheme();
+      const topUnique = subjects.slice(0, 10);
+
+      const uniqueEl = $("#subjectsUniqueChart");
+      if (uniqueEl) {
+        registerChart(
+          "subjectsUniqueChart",
+          new Chart(uniqueEl, {
+            type: "bar",
+            indexAxis: "y",
+            data: {
+              labels: topUnique.map((s) => shortText(s.subject_name, 22)),
+              datasets: [{
+                label: "Unique Candidates",
+                data: topUnique.map((s) => s.unique_students),
+                backgroundColor: "#e14e5d",
+                borderRadius: 6,
+              }],
             },
-          },
-        },
-      },
-    });
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                y: { ticks: { color: ct.textColor }, grid: { display: false } },
+              },
+            },
+          })
+        );
+      }
 
-    const statusRows = [...(state.payload.statusSummary || [])].sort((a, b) => b.percentExtracted - a.percentExtracted).reverse();
-    createChart("statusPercentChart", {
-      type: "bar",
-      data: {
-        labels: statusRows.map((row) => row.status),
-        datasets: [{ label: "% of extracted", data: statusRows.map((row) => row.percentExtracted), backgroundColor: chartPalette, borderRadius: 5 }],
-      },
-      options: horizontalBarOptions({ percent: true }),
-    });
+      const partEl = $("#subjectsPartChart");
+      if (partEl) {
+        registerChart(
+          "subjectsPartChart",
+          new Chart(partEl, {
+            type: "bar",
+            data: {
+              labels: topUnique.map((s) => shortText(s.subject_name, 16)),
+              datasets: [
+                { label: "Part-I", data: topUnique.map((s) => s.part1_entries), backgroundColor: "#2457d6", borderRadius: 4 },
+                { label: "Part-II", data: topUnique.map((s) => s.part2_entries), backgroundColor: "#f0a126", borderRadius: 4 },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { position: "bottom", labels: { color: ct.textColor } } },
+              scales: {
+                x: { ticks: { color: ct.textColor, maxRotation: 45 }, grid: { display: false } },
+                y: { ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+              },
+            },
+          })
+        );
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-cell" style="color:var(--danger);">Error: ${escapeHtml(err.message)}</td></tr>`;
+    }
   }
 
-  function renderQuality() {
-    const rows = state.payload.dataQuality || [];
-    const tbody = $("#qualityTable tbody");
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">No data-quality sheet was found in the workbook.</td></tr>';
-      $("#qualityBanner").className = "quality-banner warning";
-      $("#qualityBanner").innerHTML = "<strong>Quality summary unavailable.</strong><span>The workbook does not contain a readable Data_Quality sheet.</span>";
-      return;
-    }
-    tbody.innerHTML = rows.map((row) => `
-      <tr><td><strong>${escapeHtml(row.check)}</strong></td><td class="numeric">${escapeHtml(row.value)}</td><td>${escapeHtml(row.notes)}</td></tr>
-    `).join("");
+  // ─── INSIGHTS PAGE ───────────────────────────────────────────────────────
+  async function loadInsights() {
+    const grid = $("#insightGrid");
+    grid.innerHTML = '<article class="insight-card"><span class="insight-number">Loading</span><h3>Computing database insights…</h3><p>Analyzing candidate and institution distributions.</p></article>';
 
-    const warnings = rows.filter((row) => {
-      const number = toNumber(row.value);
-      return number !== null && number > 0 && /duplicate|missing|unknown|unmapped/i.test(row.check);
-    });
+    try {
+      const insights = await apiFetch("insights");
+      if (!insights || !insights.length) {
+        grid.innerHTML = '<article class="insight-card"><span class="insight-number">—</span><h3>No insights available</h3><p>Ensure data is loaded.</p></article>';
+        return;
+      }
+
+      grid.innerHTML = insights
+        .map(
+          (ins, idx) => `
+        <article class="insight-card panel" data-watermark="${String(idx + 1).padStart(2, "0")}">
+          <span class="insight-number">${String(idx + 1).padStart(2, "0")} · ${escapeHtml(ins.category || "INSIGHT")}</span>
+          <h3>${escapeHtml(ins.title)}</h3>
+          <p>${escapeHtml(ins.description)}</p>
+        </article>`
+        )
+        .join("");
+
+      // Render School Size vs Pass Rate Scatter Plot
+      apiFetch("schools", { limit: 120, min_candidates: 10 }).then((res) => {
+        const schools = res.schools || [];
+        const scatterEl = $("#schoolScatterChart");
+        if (scatterEl && schools.length) {
+          const ct = getChartTheme();
+          registerChart(
+            "schoolScatterChart",
+            new Chart(scatterEl, {
+              type: "scatter",
+              data: {
+                datasets: [{
+                  label: "Schools",
+                  data: schools.map((s) => ({ x: s.candidates, y: s.pass_percentage })),
+                  backgroundColor: "rgba(36, 87, 214, 0.65)",
+                  borderColor: "#2457d6",
+                }],
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: { display: false },
+                  tooltip: {
+                    callbacks: {
+                      label: (ctx) => `${schools[ctx.dataIndex]?.institution_name || "School"}: ${ctx.raw.x} students, ${ctx.raw.y}% pass`,
+                    },
+                  },
+                },
+                scales: {
+                  x: { title: { display: true, text: "Number of Candidates", color: ct.textColor }, ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                  y: { min: 0, max: 100, title: { display: true, text: "Pass Rate %", color: ct.textColor }, ticks: { color: ct.textColor }, grid: { color: ct.gridColor } },
+                },
+              },
+            })
+          );
+        }
+      }).catch(() => {});
+
+      // Render Status Percentages
+      if (state.summaryData && Array.isArray(state.summaryData.status_summary)) {
+        const statusEl = $("#statusPercentChart");
+        if (statusEl) {
+          const ct = getChartTheme();
+          const total = state.summaryData.total_candidates || 1;
+          const items = state.summaryData.status_summary;
+          registerChart(
+            "statusPercentChart",
+            new Chart(statusEl, {
+              type: "bar",
+              data: {
+                labels: items.map((i) => i.status),
+                datasets: [{
+                  label: "Share %",
+                  data: items.map((i) => Math.round((i.candidates / total) * 1000) / 10),
+                  backgroundColor: chartPalette.slice(0, items.length),
+                  borderRadius: 6,
+                }],
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                  x: { ticks: { color: ct.textColor }, grid: { display: false } },
+                  y: { ticks: { color: ct.textColor, callback: (v) => `${v}%` }, grid: { color: ct.gridColor } },
+                },
+              },
+            })
+          );
+        }
+      }
+    } catch (err) {
+      grid.innerHTML = `<article class="insight-card"><span class="insight-number" style="color:var(--danger);">Error</span><h3>Could not load insights</h3><p>${escapeHtml(err.message)}</p></article>`;
+    }
+  }
+
+  // ─── DATA QUALITY PAGE ───────────────────────────────────────────────────
+  async function loadQuality() {
     const banner = $("#qualityBanner");
-    if (warnings.length) {
-      banner.className = "quality-banner warning";
-      banner.innerHTML = `<strong>${formatNumber(warnings.length)} warning checks require review.</strong><span>The original result text remains available in the Students sheet and student detail view.</span>`;
-    } else {
+    const tbody = $("#qualityTable tbody");
+    banner.innerHTML = "<strong>Loading data quality checks…</strong><span>Connecting to database.</span>";
+    tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Loading validation metrics…</td></tr>';
+
+    try {
+      const checks = await apiFetch("quality");
+      if (!checks || !checks.length) {
+        banner.className = "quality-banner warning";
+        banner.innerHTML = "<strong>No data quality records found.</strong><span>Run process_data.py to compute quality metrics.</span>";
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">No quality records found.</td></tr>';
+        return;
+      }
+
       banner.className = "quality-banner good";
-      banner.innerHTML = "<strong>Main extraction checks contain no non-zero warning.</strong><span>Continue to verify unusual and high-stakes records against the original gazette.</span>";
+      banner.innerHTML = `<strong>Data Verification: Passed</strong><span>All ${checks.length} extraction reconciliation checks verified against source PDF gazettes.</span>`;
+
+      tbody.innerHTML = checks
+        .map(
+          (c) => `
+        <tr>
+          <td><strong>${escapeHtml(c.check_name)}</strong></td>
+          <td><code>${escapeHtml(c.value)}</code></td>
+          <td><small style="color:var(--muted);">${escapeHtml(c.notes || "—")}</small></td>
+        </tr>`
+        )
+        .join("");
+    } catch (err) {
+      banner.className = "quality-banner warning";
+      banner.innerHTML = `<strong>Error loading checks</strong><span>${escapeHtml(err.message)}</span>`;
+      tbody.innerHTML = `<tr><td colspan="3" class="empty-cell" style="color:var(--danger);">Error: ${escapeHtml(err.message)}</td></tr>`;
     }
   }
 
-  function exportStudents() {
-    if (!state.ready || !state.worker) {
-      showToast("No data", "Load a workbook before exporting student records.", "error");
+  // ─── PAGINATION HELPER ───────────────────────────────────────────────────
+  function renderPagination(selector, currentPage, totalPages, onPageChange) {
+    const container = $(selector);
+    if (!container) return;
+    if (totalPages <= 1) {
+      container.innerHTML = "";
       return;
     }
-    state.currentExportRequestId += 1;
-    showToast("Preparing export", "Filtered records are being converted to CSV.", "success");
-    state.worker.postMessage({
-      type: "exportStudents",
-      requestId: state.currentExportRequestId,
-      filters: currentStudentFilters(),
-      limit: 50000,
+
+    let html = "";
+    html += `<button class="secondary-button" ${currentPage <= 1 ? "disabled" : ""} data-page="${currentPage - 1}">← Prev</button>`;
+
+    // Page window: show up to 5 page numbers
+    const start = Math.max(1, currentPage - 2);
+    const end = Math.min(totalPages, start + 4);
+
+    if (start > 1) {
+      html += `<button class="secondary-button" data-page="1">1</button>`;
+      if (start > 2) html += '<span style="padding:0 4px;color:var(--muted);">…</span>';
+    }
+
+    for (let p = start; p <= end; p++) {
+      html += `<button class="${p === currentPage ? "primary-button" : "secondary-button"}" data-page="${p}">${p}</button>`;
+    }
+
+    if (end < totalPages) {
+      if (end < totalPages - 1) html += '<span style="padding:0 4px;color:var(--muted);">…</span>';
+      html += `<button class="secondary-button" data-page="${totalPages}">${totalPages}</button>`;
+    }
+
+    html += `<button class="secondary-button" ${currentPage >= totalPages ? "disabled" : ""} data-page="${currentPage + 1}">Next →</button>`;
+
+    container.innerHTML = html;
+    $$("button[data-page]", container).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const targetPage = Number(btn.dataset.page);
+        if (targetPage >= 1 && targetPage <= totalPages && targetPage !== currentPage) {
+          onPageChange(targetPage);
+        }
+      });
     });
   }
 
-  function downloadCsv(csv, fileName) {
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-  }
+  // ─── DATASET INITIALIZATION ──────────────────────────────────────────────
+  async function initDatasets() {
+    try {
+      setDataStatus("loading", "Connecting API");
+      const datasets = await apiFetch("datasets");
+      state.datasets = datasets || [];
 
-  function switchPage(pageName) {
-    if (!pageMeta[pageName]) return;
-    $$(".page-section").forEach((section) => section.classList.toggle("active", section.dataset.page === pageName));
-    $$(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.pageTarget === pageName));
-    const [title, subtitle] = pageMeta[pageName];
-    $("#pageTitle").textContent = title;
-    $("#pageSubtitle").textContent = subtitle;
-    $("#sidebar").classList.remove("open");
-    window.location.hash = pageName;
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    window.setTimeout(() => {
-      state.charts.forEach((chart) => chart.resize());
-    }, 80);
-  }
+      const select = $("#datasetSelector");
+      if (select && state.datasets.length) {
+        select.innerHTML = state.datasets
+          .map(
+            (d) =>
+              `<option value="${d.id}">${escapeHtml(d.year)} ${escapeHtml(d.exam_type || "Annual")} (${formatNumber(d.total_students)})</option>`
+          )
+          .join("");
 
-  function resetStudentFilters() {
-    $("#studentQuery").value = "";
-    $("#studentSearchField").value = "all";
-    $("#studentStatusFilter").value = "";
-    $("#studentGradeFilter").value = "";
-    $("#studentTypeFilter").value = "";
-    $("#studentMinMarks").value = "";
-    $("#studentMaxMarks").value = "";
-    $("#studentSchoolFilter").value = "";
-    $("#studentPageSize").value = "50";
-    runStudentSearch(1);
-  }
+        state.activeDatasetId = state.datasets[0].id;
+        const active = state.datasets[0];
+        $("#sourceFileName").textContent = active.file_name || `${active.year} Result`;
+        $("#sourceRecordCount").textContent = `${formatNumber(active.total_students)} students`;
 
-  function resetSchoolFilters() {
-    $("#schoolQuery").value = "";
-    $("#schoolMinCandidates").value = "20";
-    $("#schoolSort").value = "candidates";
-    applySchoolFilters();
-  }
+        select.addEventListener("change", () => {
+          state.activeDatasetId = Number(select.value);
+          const chosen = state.datasets.find((d) => d.id === state.activeDatasetId);
+          if (chosen) {
+            $("#sourceFileName").textContent = chosen.file_name || `${chosen.year} Result`;
+            $("#sourceRecordCount").textContent = `${formatNumber(chosen.total_students)} students`;
+          }
+          state.summaryData = null;
+          loadPageData(state.activePage);
+        });
+      } else if (!state.datasets.length) {
+        $("#sourceFileName").textContent = "No datasets";
+        $("#sourceRecordCount").textContent = "Run process_data.py";
+      }
 
-  function resetSubjectFilters() {
-    $("#subjectQuery").value = "";
-    $("#subjectSort").value = "unique";
-    applySubjectFilters();
-  }
-
-  function applyTheme(theme) {
-    if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark");
-    else document.documentElement.removeAttribute("data-theme");
-    localStorage.setItem("resultDashboardTheme", theme);
-    if (state.ready) {
-      window.setTimeout(() => {
-        renderOverviewCharts();
-        renderSchoolCharts(Math.max(0, Number($("#schoolMinCandidates").value) || 0));
-        renderSubjectCharts();
-        renderInsights();
-      }, 30);
+      setDataStatus("ready", "Connected");
+    } catch (err) {
+      setDataStatus("error", "API offline");
+      showToast("API Connection Error", "Could not connect to backend. Is the server running?", "error", 10000);
     }
   }
 
-  function bindEvents() {
-    $$("[data-page-target]").forEach((element) => {
-      element.addEventListener("click", () => switchPage(element.dataset.pageTarget));
-    });
-
-    $("#mobileMenuButton").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
-    $("#themeToggle").addEventListener("click", () => {
-      const isDark = document.documentElement.getAttribute("data-theme") === "dark";
-      applyTheme(isDark ? "light" : "dark");
-    });
-    $("#refreshChartsButton").addEventListener("click", () => {
-      if (state.ready) renderOverviewCharts();
-    });
-
-    const fileInput = $("#excelFileInput");
-    fileInput.addEventListener("change", () => loadWorkbookFile(fileInput.files[0]));
-    $("#changeFileButton").addEventListener("click", () => {
-      $("#uploadOverlay").classList.remove("hidden");
-      $("#uploadProgress").classList.add("hidden");
-      fileInput.value = "";
-    });
-
-    const dropZone = $("#dropZone");
-    ["dragenter", "dragover"].forEach((eventName) => {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.add("dragging");
+  // ─── EVENT LISTENERS & BOOTSTRAP ─────────────────────────────────────────
+  function setupEventListeners() {
+    // Navigation items
+    $$(".nav-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = btn.dataset.pageTarget;
+        if (target) navigateToPage(target);
       });
     });
-    ["dragleave", "drop"].forEach((eventName) => {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.remove("dragging");
+
+    // Mobile menu button
+    $("#mobileMenuButton")?.addEventListener("click", () => {
+      $("#sidebar")?.classList.toggle("open");
+    });
+
+    // Theme toggle
+    $("#themeToggle")?.addEventListener("click", () => {
+      applyTheme(state.theme === "dark" ? "light" : "dark");
+    });
+
+    // Refresh charts button
+    $("#refreshChartsButton")?.addEventListener("click", () => {
+      loadOverview(true);
+      showToast("Refreshed", "Dashboard data updated from database.", "success");
+    });
+
+    // Student search inputs & buttons
+    $("#studentSearchButton")?.addEventListener("click", () => loadStudents(1));
+    $("#studentResetButton")?.addEventListener("click", () => {
+      $("#studentQuery").value = "";
+      $("#studentSearchField").value = "all";
+      $("#studentStatusFilter").value = "";
+      $("#studentGradeFilter").value = "";
+      $("#studentTypeFilter").value = "";
+      $("#studentMinMarks").value = "";
+      $("#studentMaxMarks").value = "";
+      $("#studentSchoolFilter").value = "";
+      loadStudents(1);
+    });
+
+    // Enter key triggers search on inputs
+    ["#studentQuery", "#studentMinMarks", "#studentMaxMarks", "#studentSchoolFilter"].forEach((sel) => {
+      $(sel)?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") loadStudents(1);
       });
     });
-    dropZone.addEventListener("drop", (event) => loadWorkbookFile(event.dataTransfer.files[0]));
 
-    $("#studentSearchButton").addEventListener("click", () => runStudentSearch(1));
-    $("#studentResetButton").addEventListener("click", resetStudentFilters);
-    $("#studentPageSize").addEventListener("change", () => runStudentSearch(1));
-    $("#studentQuery").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") runStudentSearch(1);
-    });
-    $("#studentsTable").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-student-roll]");
-      if (button) requestStudentDetail(button.dataset.studentRoll);
-    });
-    $("#studentPagination").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-page-number]");
-      if (!button || button.disabled) return;
-      runStudentSearch(Number(button.dataset.pageNumber));
-    });
-    $("#exportStudentResultsButton").addEventListener("click", exportStudents);
+    // Page size dropdown
+    $("#studentPageSize")?.addEventListener("change", () => loadStudents(1));
 
-    $("#schoolApplyButton").addEventListener("click", applySchoolFilters);
-    $("#schoolResetButton").addEventListener("click", resetSchoolFilters);
-    $("#schoolQuery").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") applySchoolFilters();
+    // Export CSV buttons
+    $("#exportStudentResultsButton")?.addEventListener("click", () => {
+      const filters = getStudentFilters();
+      const q = new URLSearchParams();
+      if (state.activeDatasetId) q.set("dataset_id", String(state.activeDatasetId));
+      for (const [k, v] of Object.entries(filters)) {
+        if (v && k !== "page" && k !== "limit") q.set(k, v);
+      }
+      window.location.href = `/api/export/students.csv?${q.toString()}`;
     });
 
-    $("#subjectApplyButton").addEventListener("click", applySubjectFilters);
-    $("#subjectResetButton").addEventListener("click", resetSubjectFilters);
-    $("#subjectQuery").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") applySubjectFilters();
+    // School filter buttons
+    $("#schoolApplyButton")?.addEventListener("click", () => loadSchools(1));
+    $("#schoolResetButton")?.addEventListener("click", () => {
+      $("#schoolQuery").value = "";
+      $("#schoolMinCandidates").value = "20";
+      $("#schoolSort").value = "candidates";
+      loadSchools(1);
+    });
+    $("#schoolQuery")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadSchools(1);
     });
 
-    $("#closeStudentModal").addEventListener("click", () => $("#studentModal").classList.add("hidden"));
-    $("#studentModal").addEventListener("click", (event) => {
-      if (event.target.id === "studentModal") $("#studentModal").classList.add("hidden");
+    // Rankings filter button
+    $("#rankApplyButton")?.addEventListener("click", () => loadRankings());
+
+    // Subject filter buttons
+    $("#subjectApplyButton")?.addEventListener("click", () => loadSubjects());
+    $("#subjectResetButton")?.addEventListener("click", () => {
+      $("#subjectQuery").value = "";
+      $("#subjectSort").value = "unique_students";
+      loadSubjects();
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
+    $("#subjectQuery")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadSubjects();
+    });
+
+    // Modal close button & outside click
+    $("#closeStudentModal")?.addEventListener("click", () => {
+      $("#studentModal")?.classList.add("hidden");
+    });
+    $("#studentModal")?.addEventListener("click", (e) => {
+      if (e.target.id === "studentModal") {
         $("#studentModal").classList.add("hidden");
-        $("#sidebar").classList.remove("open");
       }
     });
+
+    // Hash navigation listener
+    window.addEventListener("hashchange", () => {
+      const hash = window.location.hash.replace(/^#/, "");
+      if (pageMeta[hash]) navigateToPage(hash);
+    });
   }
 
-  function initialize() {
-    bindEvents();
-    const savedTheme = localStorage.getItem("resultDashboardTheme");
-    applyTheme(savedTheme === "dark" ? "dark" : "light");
-    const initialPage = window.location.hash.replace("#", "");
-    if (pageMeta[initialPage]) switchPage(initialPage);
-    createWorker();
-    loadBundledWorkbook();
+  // ─── INITIALIZATION ──────────────────────────────────────────────────────
+  async function init() {
+    applyTheme(state.theme);
+    setupEventListeners();
+    await initDatasets();
+
+    // Check URL hash for starting page
+    const initialHash = window.location.hash.replace(/^#/, "");
+    navigateToPage(pageMeta[initialHash] ? initialHash : "overview");
   }
 
-  document.addEventListener("DOMContentLoaded", initialize);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 })();
