@@ -1,0 +1,2 @@
+# No Python package is required when deployed with a PythonAnywhere Static Files mapping.
+# Flask is optional only if you choose to serve this dashboard through a Flask route.

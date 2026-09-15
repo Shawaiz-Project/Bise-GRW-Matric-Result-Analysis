@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Interactive SSC result analytics dashboard for Excel workbooks generated from the BISE Gujranwala result gazette." />
+  <title>SSC Result Analytics Dashboard</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">RA</div>
+        <div class="brand-copy">
+          <strong>Result Analytics</strong>
+          <span>SSC 2026 Dashboard</span>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="Main navigation">
+        <button class="nav-item active" data-page-target="overview" type="button">
+          <span class="nav-icon">⌂</span><span>Overview</span>
+        </button>
+        <button class="nav-item" data-page-target="students" type="button">
+          <span class="nav-icon">◎</span><span>Students</span>
+        </button>
+        <button class="nav-item" data-page-target="schools" type="button">
+          <span class="nav-icon">▦</span><span>Schools</span>
+        </button>
+        <button class="nav-item" data-page-target="subjects" type="button">
+          <span class="nav-icon">▤</span><span>Subjects</span>
+        </button>
+        <button class="nav-item" data-page-target="insights" type="button">
+          <span class="nav-icon">✦</span><span>Insights</span>
+        </button>
+        <button class="nav-item" data-page-target="quality" type="button">
+          <span class="nav-icon">✓</span><span>Data quality</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="source-card">
+          <span class="source-label">Loaded source</span>
+          <strong id="sourceFileName">Integrated workbook</strong>
+          <small id="sourceRecordCount">Loading data/MA_2026_results_analysis.xlsx</small>
+        </div>
+        <button class="secondary-button full-width" id="changeFileButton" type="button">Load another Excel file</button>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button mobile-menu-button" id="mobileMenuButton" type="button" aria-label="Open navigation">☰</button>
+          <div>
+            <h1 id="pageTitle">Overview</h1>
+            <p id="pageSubtitle">Interactive analysis of the complete result workbook</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="status-pill" id="dataStatusPill"><span class="status-dot"></span><span>Waiting for data</span></div>
+          <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle theme">◐</button>
+        </div>
+      </header>
+
+      <main class="content-area">
+        <section class="page-section active" data-page="overview">
+          <div class="page-toolbar">
+            <div>
+              <h2>Result overview</h2>
+              <p>Key performance indicators, distributions, comparisons, and rankings.</p>
+            </div>
+            <button class="secondary-button" id="refreshChartsButton" type="button">Refresh charts</button>
+          </div>
+
+          <div class="kpi-grid" id="overviewKpis">
+            <article class="kpi-card skeleton-card"><span>Extracted candidates</span><strong>—</strong><small>Workbook total</small></article>
+            <article class="kpi-card skeleton-card"><span>Appeared</span><strong>—</strong><small>Absent and cancelled excluded</small></article>
+            <article class="kpi-card skeleton-card"><span>Passed</span><strong>—</strong><small>Successful candidates</small></article>
+            <article class="kpi-card skeleton-card"><span>Pass percentage</span><strong>—</strong><small>Passed ÷ appeared</small></article>
+            <article class="kpi-card skeleton-card"><span>Fail / subject slip</span><strong>—</strong><small>Students with failed subjects</small></article>
+            <article class="kpi-card skeleton-card"><span>Highest marks</span><strong>—</strong><small>Maximum numeric result</small></article>
+            <article class="kpi-card skeleton-card"><span>Average marks</span><strong>—</strong><small>Among numeric results</small></article>
+            <article class="kpi-card skeleton-card"><span>Schools</span><strong>—</strong><small>Institutions represented</small></article>
+          </div>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Pass versus not passed</h3><p>Share of appeared candidates</p></div></div>
+              <div class="chart-wrap"><canvas id="passFailChart"></canvas></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Candidate status</h3><p>Distribution across every extracted status</p></div></div>
+              <div class="chart-wrap"><canvas id="statusChart"></canvas></div>
+            </article>
+          </div>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel wide-chart">
+              <div class="panel-heading"><div><h3>Marks distribution</h3><p>Number of students in each marks range</p></div></div>
+              <div class="chart-wrap tall"><canvas id="marksChart"></canvas></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Grade distribution</h3><p>Grades calculated using the workbook maximum-marks assumption</p></div></div>
+              <div class="chart-wrap tall"><canvas id="gradeChart"></canvas></div>
+            </article>
+          </div>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Candidate type performance</h3><p>Passed and other outcomes by candidate type</p></div></div>
+              <div class="chart-wrap tall"><canvas id="candidateTypeChart"></canvas></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Most common failed subjects</h3><p>Unique students receiving a subject slip</p></div></div>
+              <div class="chart-wrap tall"><canvas id="subjectFailureChart"></canvas></div>
+            </article>
+          </div>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Part-I versus Part-II slips</h3><p>Failure entries for the leading subjects</p></div></div>
+              <div class="chart-wrap tall"><canvas id="subjectPartsChart"></canvas></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Largest schools</h3><p>Institutions with the highest number of candidates</p></div></div>
+              <div class="chart-wrap tall"><canvas id="largestSchoolsChart"></canvas></div>
+            </article>
+          </div>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><h3>Best school pass rates</h3><p>Top institutions with at least 20 candidates</p></div></div>
+              <div class="chart-wrap tall"><canvas id="schoolPassRateChart"></canvas></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><div><h3>Top students</h3><p>Highest marks in the workbook</p></div><button class="text-button" data-page-target="students" type="button">Open student search</button></div>
+              <div class="table-scroll compact-table-wrap">
+                <table class="data-table" id="topStudentsTable">
+                  <thead><tr><th>Rank</th><th>Roll no.</th><th>Name</th><th>Marks</th><th>Grade</th><th>School</th></tr></thead>
+                  <tbody><tr><td colspan="6" class="empty-cell">Load a workbook to view data.</td></tr></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page-section" data-page="students">
+          <div class="page-toolbar">
+            <div><h2>Student search</h2><p>Search by roll number, candidate name, school, status, grade, or failed subject.</p></div>
+            <button class="primary-button" id="exportStudentResultsButton" type="button">Export filtered CSV</button>
+          </div>
+
+          <article class="panel filter-panel">
+            <div class="filter-grid student-filter-grid">
+              <label class="field span-2"><span>Search text</span><input id="studentQuery" type="search" placeholder="Enter roll number, name, school, or subject" autocomplete="off" /></label>
+              <label class="field"><span>Search in</span><select id="studentSearchField"><option value="all">All fields</option><option value="roll">Roll number</option><option value="name">Candidate name</option><option value="school">School name</option><option value="subject">Failed subject</option></select></label>
+              <label class="field"><span>Status</span><select id="studentStatusFilter"><option value="">All statuses</option></select></label>
+              <label class="field"><span>Grade</span><select id="studentGradeFilter"><option value="">All grades</option><option>A+</option><option>A</option><option>B</option><option>C</option><option>D</option><option>E</option><option>F</option></select></label>
+              <label class="field"><span>Candidate type</span><select id="studentTypeFilter"><option value="">All candidate types</option></select></label>
+              <label class="field"><span>Minimum marks</span><input id="studentMinMarks" type="number" min="0" max="1200" placeholder="0" /></label>
+              <label class="field"><span>Maximum marks</span><input id="studentMaxMarks" type="number" min="0" max="1200" placeholder="1200" /></label>
+              <label class="field span-2"><span>School contains</span><input id="studentSchoolFilter" type="search" placeholder="Optional school filter" /></label>
+              <label class="field"><span>Rows per page</span><select id="studentPageSize"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
+              <div class="filter-actions"><button class="primary-button" id="studentSearchButton" type="button">Search</button><button class="secondary-button" id="studentResetButton" type="button">Reset</button></div>
+            </div>
+          </article>
+
+          <div class="search-summary-row">
+            <p id="studentResultSummary">No search has been run.</p>
+            <div class="pagination" id="studentPagination"></div>
+          </div>
+
+          <article class="panel table-panel">
+            <div class="table-scroll large-table-wrap">
+              <table class="data-table" id="studentsTable">
+                <thead><tr><th>Roll no.</th><th>Candidate</th><th>Type</th><th>School</th><th>Status</th><th>Marks</th><th>%</th><th>Grade</th><th>Failed subjects</th><th>Action</th></tr></thead>
+                <tbody><tr><td colspan="10" class="empty-cell">Load a workbook and run a search.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="page-section" data-page="schools">
+          <div class="page-toolbar">
+            <div><h2>School analysis</h2><p>Compare candidate volume, pass rates, average marks, and outcome categories.</p></div>
+          </div>
+
+          <div class="mini-kpi-grid" id="schoolKpis"></div>
+
+          <article class="panel filter-panel">
+            <div class="filter-grid school-filter-grid">
+              <label class="field span-2"><span>Find school</span><input id="schoolQuery" type="search" placeholder="Search school name or institution code" /></label>
+              <label class="field"><span>Minimum candidates</span><input id="schoolMinCandidates" type="number" min="0" value="20" /></label>
+              <label class="field"><span>Sort by</span><select id="schoolSort"><option value="candidates">Candidates</option><option value="passRate">Pass rate</option><option value="averageMarks">Average marks</option><option value="highestMarks">Highest marks</option></select></label>
+              <div class="filter-actions"><button class="primary-button" id="schoolApplyButton" type="button">Apply</button><button class="secondary-button" id="schoolResetButton" type="button">Reset</button></div>
+            </div>
+          </article>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>Top schools by pass rate</h3><p>Filtered using the selected minimum candidate count</p></div></div><div class="chart-wrap tall"><canvas id="schoolsPassChart"></canvas></div></article>
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>Top schools by average marks</h3><p>Average among students with numeric marks</p></div></div><div class="chart-wrap tall"><canvas id="schoolsAverageChart"></canvas></div></article>
+          </div>
+
+          <article class="panel table-panel">
+            <div class="panel-heading"><div><h3>Institution summary</h3><p id="schoolTableSummary">All schools</p></div></div>
+            <div class="table-scroll large-table-wrap">
+              <table class="data-table" id="schoolsTable">
+                <thead><tr><th>Code</th><th>Institution</th><th>Candidates</th><th>Passed</th><th>Fail/slip</th><th>Absent</th><th>Result later</th><th>Pass %</th><th>Average marks</th><th>Highest</th></tr></thead>
+                <tbody><tr><td colspan="10" class="empty-cell">Load a workbook to view school analysis.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="page-section" data-page="subjects">
+          <div class="page-toolbar">
+            <div><h2>Subject slip analysis</h2><p>Identify the subjects producing the largest number of failed or supplementary entries.</p></div>
+          </div>
+
+          <div class="mini-kpi-grid" id="subjectKpis"></div>
+
+          <article class="panel filter-panel">
+            <div class="filter-grid subject-filter-grid">
+              <label class="field span-2"><span>Find subject</span><input id="subjectQuery" type="search" placeholder="Search subject name or code" /></label>
+              <label class="field"><span>Sort by</span><select id="subjectSort"><option value="unique">Unique students</option><option value="total">Total entries</option><option value="part1">Part-I entries</option><option value="part2">Part-II entries</option></select></label>
+              <div class="filter-actions"><button class="primary-button" id="subjectApplyButton" type="button">Apply</button><button class="secondary-button" id="subjectResetButton" type="button">Reset</button></div>
+            </div>
+          </article>
+
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>Students by failed subject</h3><p>Unique candidates for the highest-frequency subjects</p></div></div><div class="chart-wrap tall"><canvas id="subjectsUniqueChart"></canvas></div></article>
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>Part comparison</h3><p>Part-I and Part-II entries by subject</p></div></div><div class="chart-wrap tall"><canvas id="subjectsPartChart"></canvas></div></article>
+          </div>
+
+          <article class="panel table-panel">
+            <div class="panel-heading"><div><h3>Subject summary</h3><p id="subjectTableSummary">All mapped and retained subject codes</p></div></div>
+            <div class="table-scroll large-table-wrap">
+              <table class="data-table" id="subjectsTable">
+                <thead><tr><th>Code</th><th>Subject</th><th>Part-I entries</th><th>Part-II entries</th><th>Total entries</th><th>Unique students</th><th>Part-II share</th></tr></thead>
+                <tbody><tr><td colspan="7" class="empty-cell">Load a workbook to view subject analysis.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="page-section" data-page="insights">
+          <div class="page-toolbar">
+            <div><h2>Automatic insights</h2><p>Important findings generated directly from the workbook summaries.</p></div>
+          </div>
+          <div class="insight-grid" id="insightGrid">
+            <article class="insight-card"><span class="insight-number">01</span><h3>Workbook not loaded</h3><p>Upload the generated Excel workbook to calculate insights.</p></article>
+          </div>
+          <div class="chart-grid two-column">
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>School size versus pass rate</h3><p>Relationship between candidate count and pass percentage</p></div></div><div class="chart-wrap tall"><canvas id="schoolScatterChart"></canvas></div></article>
+            <article class="panel chart-panel"><div class="panel-heading"><div><h3>Status percentages</h3><p>Each outcome as a percentage of extracted candidates</p></div></div><div class="chart-wrap tall"><canvas id="statusPercentChart"></canvas></div></article>
+          </div>
+        </section>
+
+        <section class="page-section" data-page="quality">
+          <div class="page-toolbar">
+            <div><h2>Data quality</h2><p>Extraction checks, reconciliation indicators, and retained unknown values.</p></div>
+          </div>
+          <div class="quality-banner" id="qualityBanner"><strong>No workbook loaded.</strong><span>Quality checks will appear after the Excel file is parsed.</span></div>
+          <article class="panel table-panel">
+            <div class="table-scroll">
+              <table class="data-table" id="qualityTable">
+                <thead><tr><th>Check</th><th>Value</th><th>Notes</th></tr></thead>
+                <tbody><tr><td colspan="3" class="empty-cell">Load a workbook to view validation checks.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="upload-overlay" id="uploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadTitle">
+    <div class="upload-card">
+      <div class="upload-logo">RA</div>
+      <h2 id="uploadTitle">Loading integrated result workbook</h2>
+      <p>The dashboard automatically loads <code>data/MA_2026_results_analysis.xlsx</code>. Manual upload remains available as a fallback.</p>
+      <label class="drop-zone" id="dropZone" for="excelFileInput">
+        <input id="excelFileInput" type="file" accept=".xlsx,.xls" hidden />
+        <span class="drop-icon">⇧</span>
+        <strong>Choose another Excel file</strong>
+        <small>use this only when the integrated workbook is missing or must be replaced</small>
+      </label>
+      <div class="upload-progress hidden" id="uploadProgress">
+        <div class="progress-meta"><span id="progressText">Preparing workbook…</span><strong id="progressPercent">0%</strong></div>
+        <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+      </div>
+      <div class="upload-note">
+        <strong>Expected sheets:</strong>
+        <span>Students, Status_Summary, Subject_Failures, Marks_Distribution, Candidate_Type, Institute_Summary, Top_Students, and Data_Quality.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="studentModal">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="studentModalTitle">
+      <div class="modal-header"><div><span class="eyebrow">Student record</span><h2 id="studentModalTitle">Candidate details</h2></div><button class="icon-button" id="closeStudentModal" type="button" aria-label="Close">×</button></div>
+      <div class="modal-body" id="studentModalBody"></div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
