@@ -1,4 +1,5 @@
 # BISE Gujranwala SSC Result Intelligence Platform
+---
 
 An enterprise-grade, high-performance educational analytics platform for BISE Gujranwala Matriculation (SSC) examination results.
 
